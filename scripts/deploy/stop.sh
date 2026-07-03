@@ -25,33 +25,74 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 COMPOSE_FILE="${REPO_ROOT}/deploy/docker-compose.yml"
 CONTAINER_NAME="vllm-coder-server"
 
+PURGE=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -p|--purge)
+      PURGE=true
+      shift
+      ;;
+    *)
+      fail "Unknown option: $1. Supported options: -p, --purge (destroys data volumes)"
+      ;;
+  esac
+done
+
 # --- Validate compose file exists --------------------------------------------
 if [[ ! -f "${COMPOSE_FILE}" ]]; then
   fail "docker-compose.yml not found at ${COMPOSE_FILE}. Nothing to stop."
 fi
 
-# --- Check current container state -------------------------------------------
-# A failed `docker inspect --format=` prints a stray empty line to stdout
-# before it exits non-zero, so `X=$(cmd || echo fallback)` would capture
-# "\nabsent" instead of "absent". Check the exit status explicitly instead.
+# --- Check current container states ------------------------------------------
 if ! CONTAINER_STATE=$(docker inspect --format='{{.State.Status}}' "${CONTAINER_NAME}" 2>/dev/null); then
   CONTAINER_STATE="absent"
 fi
 
-if [[ "${CONTAINER_STATE}" == "absent" ]]; then
-  warn "Container '${CONTAINER_NAME}' does not exist. Stack may already be down."
+# Sourcing .env for Open WebUI variables if present
+set +u
+if [[ -f "${REPO_ROOT}/deploy/.env" ]]; then
+  # shellcheck disable=SC1091
+  source "${REPO_ROOT}/deploy/.env"
+fi
+set -u
+
+WEBUI_CONTAINER="${OPEN_WEBUI_CONTAINER_NAME:-open-webui}"
+if ! WEBUI_STATE=$(docker inspect --format='{{.State.Status}}' "${WEBUI_CONTAINER}" 2>/dev/null); then
+  WEBUI_STATE="absent"
+fi
+
+if [[ "${CONTAINER_STATE}" == "absent" && "${WEBUI_STATE}" == "absent" ]]; then
+  warn "vLLM and Open WebUI containers do not exist. Stack may already be down."
   exit 0
 fi
 
-info "Container '${CONTAINER_NAME}' is currently: ${CONTAINER_STATE}"
+info "vLLM container: ${CONTAINER_STATE} | Open WebUI container: ${WEBUI_STATE}"
+
+# --- Setup compose arguments -------------------------------------------------
+COMPOSE_ARGS=("-f" "${COMPOSE_FILE}")
+OVERRIDE_FILE="${REPO_ROOT}/deploy/docker-compose.override.yml"
+if [[ -f "${OVERRIDE_FILE}" ]]; then
+  COMPOSE_ARGS+=("-f" "${OVERRIDE_FILE}")
+fi
+
+OPEN_WEBUI_COMPOSE="${REPO_ROOT}/deploy/docker-compose.open-webui.yml"
+if [[ -f "${OPEN_WEBUI_COMPOSE}" ]]; then
+  if [[ "${ENABLE_OPEN_WEBUI:-false}" == "true" || "${WEBUI_STATE}" != "absent" ]]; then
+    COMPOSE_ARGS+=("-f" "${OPEN_WEBUI_COMPOSE}")
+  fi
+fi
+
+DOWN_ARGS=()
+if [[ "${PURGE}" == "true" ]]; then
+  DOWN_ARGS+=("--volumes")
+  warn "Purging persistent volumes (data will be deleted)..."
+fi
 
 # --- Graceful teardown -------------------------------------------------------
-# --timeout 30: give processes 30s to flush state before SIGKILL.
-# NCCL collective ops can take a few seconds to unwind cleanly.
-info "Stopping vLLM stack (30s graceful timeout)..."
-docker compose -f "${COMPOSE_FILE}" down --timeout 30
+info "Stopping container stack (30s graceful timeout)..."
+docker compose "${COMPOSE_ARGS[@]}" down --timeout 30 "${DOWN_ARGS[@]}"
 
-ok "Stack stopped. GPU VRAM has been released."
+ok "Stack stopped."
 
 # --- Post-stop VRAM confirmation ---------------------------------------------
 if command -v nvidia-smi &>/dev/null; then

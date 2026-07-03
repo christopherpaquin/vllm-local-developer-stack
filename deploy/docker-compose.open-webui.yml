@@ -1,0 +1,23 @@
+# =============================================================================
+# docker-compose.open-webui.yml
+# Optional Open WebUI service definition for local/LAN interaction with vLLM
+# =============================================================================
+
+services:
+  open-webui:
+    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:main}
+    container_name: ${OPEN_WEBUI_CONTAINER_NAME:-open-webui}
+    ports:
+      - "${OPEN_WEBUI_HOST:-0.0.0.0}:${OPEN_WEBUI_PORT:-3000}:8080"
+    environment:
+      - OPENAI_API_BASE_URL=${OPEN_WEBUI_OPENAI_API_BASE_URL:-http://vllm:8000/v1}
+      - OPENAI_API_KEY=${OPEN_WEBUI_OPENAI_API_KEY:-}
+      - SCARF_NO_ANALYTICS=true
+      - DO_NOT_TRACK=true
+    volumes:
+      - open-webui-data:/app/backend/data
+    restart: ${OPEN_WEBUI_RESTART_POLICY:-unless-stopped}
+
+volumes:
+  open-webui-data:
+    name: ${OPEN_WEBUI_DATA_VOLUME:-open-webui-data}

@@ -105,7 +105,7 @@ services:
     # -------------------------------------------------------------------------
     # Restart policy: restart unless explicitly stopped (docker compose down)
     # -------------------------------------------------------------------------
-    restart: unless-stopped
+    restart: ${VLLM_RESTART_POLICY:-unless-stopped}
 
     # -------------------------------------------------------------------------
     # Shared memory: PyTorch DataLoader and NCCL require sufficient /dev/shm.

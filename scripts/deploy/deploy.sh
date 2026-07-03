@@ -63,6 +63,31 @@ is_loopback() {
   [[ "$1" =~ ^127\. ]]
 }
 
+is_port_in_use() {
+  local port="$1"
+  if command -v ss &>/dev/null; then
+    ss -tln | grep -q -E ":${port}\s"
+  elif command -v netstat &>/dev/null; then
+    netstat -tln | grep -q -E ":${port}\s"
+  else
+    # Fallback to bash tcp socket check
+    (timeout 1 bash -c "cat < /dev/null > /dev/tcp/127.0.0.1/${port}") &>/dev/null
+  fi
+}
+
+check_port_available() {
+  local port="$1"
+  local container_name="$2"
+
+  if is_port_in_use "${port}"; then
+    if docker ps --filter "name=^/${container_name}$" --filter "status=running" --format '{{.Names}}' | grep -q "^${container_name}$" 2>/dev/null; then
+      info "Port ${port} is in use, but it is owned by the running container '${container_name}' which will be recreated."
+    else
+      fail "Port ${port} is already in use by another process. Please free the port before deploying."
+    fi
+  fi
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DEPLOY_DIR="${REPO_ROOT}/deploy"
@@ -121,11 +146,43 @@ U_DTYPE="${DTYPE:-}"
 U_ENFORCE_EAGER="${ENFORCE_EAGER:-}"
 U_MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
 
+# Optional Open WebUI vars
+U_ENABLE_OPEN_WEBUI="${ENABLE_OPEN_WEBUI:-false}"
+U_OPEN_WEBUI_IMAGE="${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:main}"
+U_OPEN_WEBUI_CONTAINER_NAME="${OPEN_WEBUI_CONTAINER_NAME:-open-webui}"
+U_OPEN_WEBUI_HOST="${OPEN_WEBUI_HOST:-0.0.0.0}"
+U_OPEN_WEBUI_PORT="${OPEN_WEBUI_PORT:-3000}"
+U_OPEN_WEBUI_DATA_VOLUME="${OPEN_WEBUI_DATA_VOLUME:-open-webui-data}"
+U_OPEN_WEBUI_API_BASE="${OPEN_WEBUI_OPENAI_API_BASE_URL:-http://vllm:8000/v1}"
+U_OPEN_WEBUI_API_KEY="${OPEN_WEBUI_OPENAI_API_KEY:-}"
+U_OPEN_WEBUI_RESTART_POLICY="${OPEN_WEBUI_RESTART_POLICY:-unless-stopped}"
+U_VLLM_RESTART_POLICY="${VLLM_RESTART_POLICY:-unless-stopped}"
+U_LAN_CIDR="${LAN_CIDR:-}"
+
+# Validate ENABLE_OPEN_WEBUI
+if [[ "${U_ENABLE_OPEN_WEBUI}" != "true" && "${U_ENABLE_OPEN_WEBUI}" != "false" ]]; then
+  fail "ENABLE_OPEN_WEBUI in deploy/.env must be either 'true' or 'false' (found: '${U_ENABLE_OPEN_WEBUI}')."
+fi
+
+# Validate ports are valid integers
+if ! [[ "${U_PORT}" =~ ^[0-9]+$ ]]; then
+  fail "PORT (vLLM port) must be a valid integer (found: '${U_PORT}')."
+fi
+if ! [[ "${U_OPEN_WEBUI_PORT}" =~ ^[0-9]+$ ]]; then
+  fail "OPEN_WEBUI_PORT must be a valid integer (found: '${U_OPEN_WEBUI_PORT}')."
+fi
+
+# Validate port conflict
+if [[ "${U_ENABLE_OPEN_WEBUI}" == "true" && "${U_PORT}" -eq "${U_OPEN_WEBUI_PORT}" ]]; then
+  fail "Conflict: vLLM PORT and OPEN_WEBUI_PORT cannot be the same (both are ${U_PORT})."
+fi
+
 ok "deploy/.env loaded."
 info "Model         : ${U_MODEL}"
 info "Served as     : ${U_SERVED_NAME}"
 info "Port          : ${U_PORT}"
 info "HF cache      : ${U_HF_CACHE}"
+info "Open WebUI    : ${U_ENABLE_OPEN_WEBUI} (Port: ${U_OPEN_WEBUI_PORT})"
 
 # =============================================================================
 # STEP 2 — Resolve BIND_HOST
@@ -168,46 +225,137 @@ if is_loopback "${U_BIND_HOST}"; then
   info "BIND_HOST=${U_BIND_HOST} is loopback-only — not reachable from the network. Skipping firewall check."
 
 elif command -v ufw &>/dev/null && ufw status | grep -q "^Status: active"; then
-  info "ufw is active — checking inbound/outbound rules for ${U_PORT}/tcp..."
+  info "ufw is active — checking inbound/outbound rules..."
 
-  # Standard `ufw allow <port>` rules are inbound and show up as, e.g.:
-  #   8000/tcp                   ALLOW       Anywhere
-  if ufw status | grep -qE "^${U_PORT}(/tcp)?[[:space:]]+ALLOW([[:space:]]|$)"; then
+  # 1. vLLM API Port Check & Add
+  if ufw status | grep -q -E "${U_PORT}(/tcp)?\s+ALLOW"; then
     ok "ufw already allows inbound traffic on ${U_PORT}/tcp."
   else
-    warn "ufw is active but does not allow inbound traffic on ${U_PORT}/tcp. Adding rule..."
-    ufw allow in "${U_PORT}/tcp" comment "vLLM API (added by deploy.sh)"
-    ok "Added: ufw allow in ${U_PORT}/tcp"
+    if [[ -n "${U_LAN_CIDR}" ]]; then
+      warn "Adding ufw rule: allow proto tcp from ${U_LAN_CIDR} to any port ${U_PORT}..."
+      ufw allow proto tcp from "${U_LAN_CIDR}" to any port "${U_PORT}" comment "vLLM API LAN (added by deploy.sh)"
+    else
+      warn "Adding ufw rule: allow in ${U_PORT}/tcp..."
+      ufw allow in "${U_PORT}/tcp" comment "vLLM API (added by deploy.sh)"
+    fi
+    # Validation
+    if ufw status | grep -q -E "${U_PORT}(/tcp)?\s+ALLOW"; then
+      ok "Verified: vLLM API firewall rule is active."
+    else
+      fail "Failed to verify vLLM API firewall rule."
+    fi
   fi
 
-  # Most ufw installs default to "allow outgoing", so outbound is already
-  # open. Only add an explicit rule if the default policy actually denies it.
+  # 2. Open WebUI Port Check & Add (when enabled)
+  if [[ "${U_ENABLE_OPEN_WEBUI}" == "true" ]]; then
+    if ufw status | grep -q -E "${U_OPEN_WEBUI_PORT}(/tcp)?\s+ALLOW"; then
+      ok "ufw already allows inbound traffic on ${U_OPEN_WEBUI_PORT}/tcp."
+    else
+      if [[ -n "${U_LAN_CIDR}" ]]; then
+        warn "Adding ufw rule: allow proto tcp from ${U_LAN_CIDR} to any port ${U_OPEN_WEBUI_PORT}..."
+        ufw allow proto tcp from "${U_LAN_CIDR}" to any port "${U_OPEN_WEBUI_PORT}" comment "Open WebUI LAN (added by deploy.sh)"
+      else
+        warn "Adding ufw rule: allow in ${U_OPEN_WEBUI_PORT}/tcp..."
+        ufw allow in "${U_OPEN_WEBUI_PORT}/tcp" comment "Open WebUI (added by deploy.sh)"
+      fi
+      # Validation
+      if ufw status | grep -q -E "${U_OPEN_WEBUI_PORT}(/tcp)?\s+ALLOW"; then
+        ok "Verified: Open WebUI firewall rule is active."
+      else
+        fail "Failed to verify Open WebUI firewall rule."
+      fi
+    fi
+  fi
+
+  # 3. Outbound rules policy check
   if ufw status verbose | grep -qE "Default:.*deny \(outgoing\)"; then
-    # Explicit outbound rules print with reversed columns, e.g.:
-    #   Anywhere                   ALLOW OUT   8000/tcp
     if ufw status | grep -qE "ALLOW OUT.*${U_PORT}/tcp"; then
       ok "ufw already allows outbound traffic on ${U_PORT}/tcp."
     else
-      warn "ufw's default outgoing policy is deny. Adding an explicit outbound allow rule..."
-      ufw allow out "${U_PORT}/tcp" comment "vLLM API (added by deploy.sh)"
+      warn "ufw's default outgoing policy is deny. Adding an explicit outbound allow rule for vLLM..."
+      ufw allow out "${U_PORT}/tcp" comment "vLLM API outbound (added by deploy.sh)"
       ok "Added: ufw allow out ${U_PORT}/tcp"
     fi
+    if [[ "${U_ENABLE_OPEN_WEBUI}" == "true" ]]; then
+      if ufw status | grep -qE "ALLOW OUT.*${U_OPEN_WEBUI_PORT}/tcp"; then
+        ok "ufw already allows outbound traffic on ${U_OPEN_WEBUI_PORT}/tcp."
+      else
+        warn "ufw's default outgoing policy is deny. Adding an explicit outbound allow rule for Open WebUI..."
+        ufw allow out "${U_OPEN_WEBUI_PORT}/tcp" comment "Open WebUI outbound (added by deploy.sh)"
+        ok "Added: ufw allow out ${U_OPEN_WEBUI_PORT}/tcp"
+      fi
+    fi
   else
-    ok "ufw's default outgoing policy already allows outbound traffic — no outbound rule needed."
+    ok "ufw's default outgoing policy already allows outbound traffic — no outbound rules needed."
   fi
 
 elif command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld; then
-  info "firewalld is active — checking inbound rule for ${U_PORT}/tcp..."
+  info "firewalld is active — checking inbound rules..."
 
-  if firewall-cmd --query-port="${U_PORT}/tcp" &>/dev/null; then
-    ok "firewalld already allows traffic on ${U_PORT}/tcp."
+  # 1. vLLM API Port Check & Add
+  if [[ -n "${U_LAN_CIDR}" ]]; then
+    if firewall-cmd --permanent --query-rich-rule="rule family='ipv4' source address='${U_LAN_CIDR}' port port='${U_PORT}' protocol='tcp' accept" &>/dev/null; then
+      ok "firewalld already allows traffic on ${U_PORT}/tcp from ${U_LAN_CIDR}."
+    else
+      warn "Adding firewalld rich rule for port ${U_PORT} from ${U_LAN_CIDR}..."
+      firewall-cmd --permanent --add-rich-rule="rule family='ipv4' source address='${U_LAN_CIDR}' port port='${U_PORT}' protocol='tcp' accept"
+      firewall-cmd --reload
+      # Validation
+      if firewall-cmd --permanent --query-rich-rule="rule family='ipv4' source address='${U_LAN_CIDR}' port port='${U_PORT}' protocol='tcp' accept" &>/dev/null; then
+        ok "Verified: firewalld restricted rule for ${U_PORT} is active."
+      else
+        fail "Failed to verify restricted firewalld rule for port ${U_PORT}."
+      fi
+    fi
   else
-    warn "firewalld is active but does not allow ${U_PORT}/tcp. Adding rule..."
-    firewall-cmd --permanent --add-port="${U_PORT}/tcp"
-    firewall-cmd --reload
-    ok "Added: firewall-cmd --add-port=${U_PORT}/tcp (permanent)"
+    if firewall-cmd --query-port="${U_PORT}/tcp" &>/dev/null; then
+      ok "firewalld already allows traffic on ${U_PORT}/tcp."
+    else
+      warn "Adding firewalld port rule for ${U_PORT}/tcp..."
+      firewall-cmd --permanent --add-port="${U_PORT}/tcp"
+      firewall-cmd --reload
+      # Validation
+      if firewall-cmd --query-port="${U_PORT}/tcp" &>/dev/null; then
+        ok "Verified: firewalld rule for port ${U_PORT}/tcp is active."
+      else
+        fail "Failed to verify firewalld rule for port ${U_PORT}/tcp."
+      fi
+    fi
   fi
-  info "firewalld's default zone permits outbound traffic — no separate outbound rule needed."
+
+  # 2. Open WebUI Port Check & Add (when enabled)
+  if [[ "${U_ENABLE_OPEN_WEBUI}" == "true" ]]; then
+    if [[ -n "${U_LAN_CIDR}" ]]; then
+      if firewall-cmd --permanent --query-rich-rule="rule family='ipv4' source address='${U_LAN_CIDR}' port port='${U_OPEN_WEBUI_PORT}' protocol='tcp' accept" &>/dev/null; then
+        ok "firewalld already allows traffic on ${U_OPEN_WEBUI_PORT}/tcp from ${U_LAN_CIDR}."
+      else
+        warn "Adding firewalld rich rule for port ${U_OPEN_WEBUI_PORT} from ${U_LAN_CIDR}..."
+        firewall-cmd --permanent --add-rich-rule="rule family='ipv4' source address='${U_LAN_CIDR}' port port='${U_OPEN_WEBUI_PORT}' protocol='tcp' accept"
+        firewall-cmd --reload
+        # Validation
+        if firewall-cmd --permanent --query-rich-rule="rule family='ipv4' source address='${U_LAN_CIDR}' port port='${U_OPEN_WEBUI_PORT}' protocol='tcp' accept" &>/dev/null; then
+          ok "Verified: firewalld restricted rule for ${U_OPEN_WEBUI_PORT} is active."
+        else
+          fail "Failed to verify restricted firewalld rule for port ${U_OPEN_WEBUI_PORT}."
+        fi
+      fi
+    else
+      if firewall-cmd --query-port="${U_OPEN_WEBUI_PORT}/tcp" &>/dev/null; then
+        ok "firewalld already allows traffic on ${U_OPEN_WEBUI_PORT}/tcp."
+      else
+        warn "Adding firewalld port rule for ${U_OPEN_WEBUI_PORT}/tcp..."
+        firewall-cmd --permanent --add-port="${U_OPEN_WEBUI_PORT}/tcp"
+        firewall-cmd --reload
+        # Validation
+        if firewall-cmd --query-port="${U_OPEN_WEBUI_PORT}/tcp" &>/dev/null; then
+          ok "Verified: firewalld rule for port ${U_OPEN_WEBUI_PORT}/tcp is active."
+        else
+          fail "Failed to verify firewalld rule for port ${U_OPEN_WEBUI_PORT}/tcp."
+        fi
+      fi
+    fi
+  fi
+  info "firewalld's default zone permits outbound traffic — no separate outbound rules needed."
 
 else
   info "No active firewall (ufw/firewalld) detected — nothing to configure."
@@ -248,6 +396,17 @@ set_env_var SERVED_MODEL_NAME "${U_SERVED_NAME}"
 set_env_var PORT              "${U_PORT}"
 set_env_var HF_CACHE_DIR      "${U_HF_CACHE}"
 [[ -n "${U_HF_TOKEN}" ]] && set_env_var HF_TOKEN "${U_HF_TOKEN}"
+set_env_var ENABLE_OPEN_WEBUI          "${U_ENABLE_OPEN_WEBUI}"
+set_env_var OPEN_WEBUI_IMAGE           "${U_OPEN_WEBUI_IMAGE}"
+set_env_var OPEN_WEBUI_CONTAINER_NAME  "${U_OPEN_WEBUI_CONTAINER_NAME}"
+set_env_var OPEN_WEBUI_HOST            "${U_OPEN_WEBUI_HOST}"
+set_env_var OPEN_WEBUI_PORT            "${U_OPEN_WEBUI_PORT}"
+set_env_var OPEN_WEBUI_DATA_VOLUME     "${U_OPEN_WEBUI_DATA_VOLUME}"
+set_env_var OPEN_WEBUI_OPENAI_API_BASE_URL "${U_OPEN_WEBUI_API_BASE}"
+set_env_var OPEN_WEBUI_OPENAI_API_KEY  "${U_OPEN_WEBUI_API_KEY}"
+set_env_var OPEN_WEBUI_RESTART_POLICY  "${U_OPEN_WEBUI_RESTART_POLICY}"
+set_env_var VLLM_RESTART_POLICY        "${U_VLLM_RESTART_POLICY}"
+[[ -n "${U_LAN_CIDR}" ]] && set_env_var LAN_CIDR "${U_LAN_CIDR}"
 
 ok "Configuration finalised. GPU-tuned values + user settings merged."
 
@@ -313,6 +472,7 @@ services:
   vllm:
     ports:
       - "${U_BIND_HOST}:${U_PORT}:8000"
+    restart: "${U_VLLM_RESTART_POLICY}"
     command: >
       --model                  ${U_MODEL}
       --tensor-parallel-size   ${FINAL_TP}
@@ -341,11 +501,11 @@ step "STEP 7/8 — Ensuring Boot Persistence"
 # install-prereqs.sh only enables it when installing Docker for the first
 # time, so an already-installed Docker daemon may still be boot-disabled.
 if systemctl is-enabled --quiet docker 2>/dev/null; then
-  ok "docker.service is enabled at boot — the vLLM container will restart automatically after a reboot."
+  ok "docker.service is enabled at boot."
 else
   warn "docker.service is not enabled at boot. Enabling it now..."
-  systemctl enable docker
-  ok "docker.service enabled — the vLLM container will now restart automatically after a reboot."
+  systemctl enable docker || fail "Failed to enable docker.service at boot."
+  ok "docker.service enabled."
 fi
 
 # =============================================================================
@@ -353,28 +513,56 @@ fi
 # =============================================================================
 step "STEP 8/8 — Launching vLLM Server"
 
+if ! command -v docker &>/dev/null; then
+  fail "Docker is not installed or not in PATH. Run scripts/prereqs/install-prereqs.sh first."
+fi
+if ! docker compose version &>/dev/null; then
+  fail "Docker Compose (v2) is not available. Ensure the docker-compose-plugin is installed."
+fi
+
 CONTAINER_NAME="vllm-coder-server"
 
-# Clean up any stale container before starting (same logic as validate-vram.sh)
-if ! CONTAINER_STATE=$(docker inspect \
-    --format='{{.State.Status}}' "${CONTAINER_NAME}" 2>/dev/null); then
+# Sourcing both Compose files if Open WebUI is enabled
+COMPOSE_DOWN_ARGS=("-f" "${COMPOSE_FILE}" "-f" "${OVERRIDE_FILE}")
+if [[ "${U_ENABLE_OPEN_WEBUI}" == "true" ]]; then
+  COMPOSE_DOWN_ARGS+=("-f" "${REPO_ROOT}/deploy/docker-compose.open-webui.yml")
+fi
+
+# Clean up any stale containers before starting
+if ! CONTAINER_STATE=$(docker inspect --format='{{.State.Status}}' "${CONTAINER_NAME}" 2>/dev/null); then
   CONTAINER_STATE="absent"
 fi
 
-if [[ "${CONTAINER_STATE}" == "exited" || \
-      "${CONTAINER_STATE}" == "dead"   || \
-      "${CONTAINER_STATE}" == "restarting" ]]; then
-  warn "Stale container found (state: ${CONTAINER_STATE}). Removing before restart..."
-  docker compose -f "${COMPOSE_FILE}" -f "${OVERRIDE_FILE}" down
+WEBUI_STATE="absent"
+if [[ "${U_ENABLE_OPEN_WEBUI}" == "true" ]]; then
+  if ! WEBUI_STATE=$(docker inspect --format='{{.State.Status}}' "${U_OPEN_WEBUI_CONTAINER_NAME}" 2>/dev/null); then
+    WEBUI_STATE="absent"
+  fi
 fi
 
-info "Starting container..."
-docker compose \
-  -f "${COMPOSE_FILE}" \
-  -f "${OVERRIDE_FILE}" \
-  up -d
+if [[ "${CONTAINER_STATE}" == "exited" || "${CONTAINER_STATE}" == "dead" || "${CONTAINER_STATE}" == "restarting" || \
+      "${WEBUI_STATE}" == "exited" || "${WEBUI_STATE}" == "dead" || "${WEBUI_STATE}" == "restarting" ]]; then
+  warn "Stale container(s) found (vLLM: ${CONTAINER_STATE}, WebUI: ${WEBUI_STATE}). Removing before restart..."
+  docker compose "${COMPOSE_DOWN_ARGS[@]}" down
+fi
 
-ok "Container started. Monitoring startup (model load typically takes 2–5 min)..."
+# Port availability and conflict checks
+check_port_available "${U_PORT}" "${CONTAINER_NAME}"
+if [[ "${U_ENABLE_OPEN_WEBUI}" == "true" ]]; then
+  check_port_available "${U_OPEN_WEBUI_PORT}" "${U_OPEN_WEBUI_CONTAINER_NAME}"
+fi
+
+info "Starting container stack..."
+COMPOSE_UP_ARGS=("-f" "${COMPOSE_FILE}" "-f" "${OVERRIDE_FILE}")
+if [[ "${U_ENABLE_OPEN_WEBUI}" == "true" ]]; then
+  COMPOSE_UP_ARGS+=("-f" "${REPO_ROOT}/deploy/docker-compose.open-webui.yml")
+fi
+
+if ! docker compose "${COMPOSE_UP_ARGS[@]}" up -d; then
+  fail "Docker Compose deployment failed to start the services."
+fi
+
+ok "Container stack started. Monitoring startup (model load typically takes 2–5 min)..."
 echo ""
 
 # --- Inline startup monitor --------------------------------------------------
@@ -405,20 +593,8 @@ while [[ "${ELAPSED}" -lt "${STARTUP_TIMEOUT}" ]]; do
 
   if echo "${LOGS}" | grep -q "Uvicorn running on"; then
     echo ""
-    ok "Server is UP!"
-    echo ""
-    echo -e "${GREEN}${BOLD}╔════════════════════════════════════════════════════════════════╗${RESET}"
-    echo -e "${GREEN}${BOLD}║  Deployment successful.                                        ║${RESET}"
-    echo -e "${GREEN}${BOLD}║                                                                ║${RESET}"
-    printf  "${GREEN}${BOLD}║  API endpoint  : http://%-38s║${RESET}\n" "${U_BIND_HOST}:${U_PORT}/v1"
-    printf  "${GREEN}${BOLD}║  Model alias   : %-46s║${RESET}\n" "${U_SERVED_NAME}"
-    echo -e "${GREEN}${BOLD}║                                                                ║${RESET}"
-    echo -e "${GREEN}${BOLD}║  Next steps:                                                   ║${RESET}"
-    echo -e "${GREEN}${BOLD}║    bash scripts/deploy/setup-continue.sh — configure VS Code   ║${RESET}"
-    echo -e "${GREEN}${BOLD}║    bash scripts/tuning/benchmark.sh      — verify throughput   ║${RESET}"
-    echo -e "${GREEN}${BOLD}║    bash scripts/deploy/stop.sh           — graceful shutdown   ║${RESET}"
-    echo -e "${GREEN}${BOLD}╚════════════════════════════════════════════════════════════════╝${RESET}"
-    exit 0
+    ok "vLLM server is UP!"
+    break
   fi
 
   if echo "${LOGS}" | grep -qiE "(cuda out of memory|out of memory|OOM)"; then
@@ -427,10 +603,107 @@ while [[ "${ELAPSED}" -lt "${STARTUP_TIMEOUT}" ]]; do
   fi
 done
 
+if [[ "${ELAPSED}" -ge "${STARTUP_TIMEOUT}" ]]; then
+  echo ""
+  warn "Server did not signal readiness within ${STARTUP_TIMEOUT}s."
+  warn "The model may still be loading — 32B models can take 5+ min from cold storage."
+  echo ""
+  info "Watch logs : docker compose ${COMPOSE_UP_ARGS[*]} logs -f"
+  info "Check VRAM : bash scripts/deploy/validate-vram.sh"
+  exit 1
+fi
+
+# =============================================================================
+# Post-deployment Validation
+# =============================================================================
+step "Post-deployment Validation"
+
+# 1. Check Docker service boot persistence
+if systemctl is-enabled --quiet docker 2>/dev/null; then
+  ok "Docker is enabled to start at boot."
+else
+  fail "Docker service is not enabled to start at boot."
+fi
+
+# 2. Check vLLM container status
+VLLM_STATUS=$(docker inspect --format='{{.State.Status}}' "${CONTAINER_NAME}" 2>/dev/null || echo "absent")
+if [[ "${VLLM_STATUS}" == "running" ]]; then
+  ok "vLLM container '${CONTAINER_NAME}' is running."
+else
+  fail "vLLM container '${CONTAINER_NAME}' is not running (status: ${VLLM_STATUS})."
+fi
+
+# 3. Check vLLM restart policy
+VLLM_RESTART=$(docker inspect --format='{{.HostConfig.RestartPolicy.Name}}' "${CONTAINER_NAME}" 2>/dev/null || echo "unknown")
+if [[ "${VLLM_RESTART}" == "${U_VLLM_RESTART_POLICY}" ]]; then
+  ok "vLLM container restart policy is '${U_VLLM_RESTART_POLICY}'."
+else
+  fail "vLLM container restart policy is '${VLLM_RESTART}' (expected: '${U_VLLM_RESTART_POLICY}')."
+fi
+
+# 4. Check vLLM API endpoint
+info "Querying vLLM API models endpoint..."
+if curl -sf "http://localhost:${U_PORT}/v1/models" >/dev/null; then
+  ok "vLLM API endpoint is responding successfully."
+else
+  fail "vLLM API endpoint failed to respond at http://localhost:${U_PORT}/v1/models"
+fi
+
+# 5. Optional Open WebUI validations
+if [[ "${U_ENABLE_OPEN_WEBUI}" == "true" ]]; then
+  # Check Open WebUI container status
+  WEBUI_STATUS=$(docker inspect --format='{{.State.Status}}' "${U_OPEN_WEBUI_CONTAINER_NAME}" 2>/dev/null || echo "absent")
+  if [[ "${WEBUI_STATUS}" == "running" ]]; then
+    ok "Open WebUI container '${U_OPEN_WEBUI_CONTAINER_NAME}' is running."
+  else
+    fail "Open WebUI container '${U_OPEN_WEBUI_CONTAINER_NAME}' is not running (status: ${WEBUI_STATUS})."
+  fi
+
+  # Check Open WebUI restart policy
+  WEBUI_RESTART=$(docker inspect --format='{{.HostConfig.RestartPolicy.Name}}' "${U_OPEN_WEBUI_CONTAINER_NAME}" 2>/dev/null || echo "unknown")
+  if [[ "${WEBUI_RESTART}" == "${U_OPEN_WEBUI_RESTART_POLICY}" ]]; then
+    ok "Open WebUI container restart policy is '${U_OPEN_WEBUI_RESTART_POLICY}'."
+  else
+    fail "Open WebUI container restart policy is '${WEBUI_RESTART}' (expected: '${U_OPEN_WEBUI_RESTART_POLICY}')."
+  fi
+
+  # Check Open WebUI HTTP endpoint responds
+  info "Querying Open WebUI HTTP endpoint..."
+  if curl -sf "http://localhost:${U_OPEN_WEBUI_PORT}" >/dev/null || curl -sfI "http://localhost:${U_OPEN_WEBUI_PORT}" >/dev/null; then
+    ok "Open WebUI endpoint is responding successfully."
+  else
+    fail "Open WebUI HTTP endpoint failed to respond at http://localhost:${U_OPEN_WEBUI_PORT}"
+  fi
+
+  # Validate Open WebUI can reach vLLM container
+  info "Verifying container-to-container connectivity..."
+  if docker exec "${U_OPEN_WEBUI_CONTAINER_NAME}" which curl &>/dev/null; then
+    if docker exec "${U_OPEN_WEBUI_CONTAINER_NAME}" curl -sf "${U_OPEN_WEBUI_API_BASE}/models" >/dev/null; then
+      ok "Open WebUI container successfully reached vLLM container via ${U_OPEN_WEBUI_API_BASE}."
+    else
+      warn "Open WebUI container could not reach vLLM via ${U_OPEN_WEBUI_API_BASE} inside the Docker network."
+    fi
+  elif docker exec "${U_OPEN_WEBUI_CONTAINER_NAME}" python3 -c "import urllib.request; urllib.request.urlopen('${U_OPEN_WEBUI_API_BASE}/models')" &>/dev/null; then
+    ok "Open WebUI container successfully reached vLLM container via ${U_OPEN_WEBUI_API_BASE} (verified via python3)."
+  else
+    warn "Could not verify container-to-container connectivity (curl/python3 unavailable or connection failed)."
+  fi
+fi
+
 echo ""
-warn "Server did not signal readiness within ${STARTUP_TIMEOUT}s."
-warn "The model may still be loading — 32B models can take 5+ min from cold storage."
+ok "All post-deployment validations passed!"
 echo ""
-info "Watch logs : docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.override.yml logs -f"
-info "Check VRAM : bash scripts/deploy/validate-vram.sh"
-exit 1
+echo -e "${GREEN}${BOLD}╔════════════════════════════════════════════════════════════════╗${RESET}"
+echo -e "${GREEN}${BOLD}║  Deployment successful.                                        ║${RESET}"
+echo -e "${GREEN}${BOLD}║                                                                ║${RESET}"
+printf  "${GREEN}${BOLD}║  vLLM API      : http://%-38s║${RESET}\n" "${U_BIND_HOST}:${U_PORT}/v1"
+if [[ "${U_ENABLE_OPEN_WEBUI}" == "true" ]]; then
+  printf  "${GREEN}${BOLD}║  Open WebUI    : http://%-38s║${RESET}\n" "${U_BIND_HOST}:${U_OPEN_WEBUI_PORT}"
+fi
+echo -e "${GREEN}${BOLD}║                                                                ║${RESET}"
+echo -e "${GREEN}${BOLD}║  Next steps:                                                   ║${RESET}"
+echo -e "${GREEN}${BOLD}║    bash scripts/deploy/setup-continue.sh — configure VS Code   ║${RESET}"
+echo -e "${GREEN}${BOLD}║    bash scripts/tuning/benchmark.sh      — verify throughput   ║${RESET}"
+echo -e "${GREEN}${BOLD}║    bash scripts/deploy/stop.sh           — graceful shutdown   ║${RESET}"
+echo -e "${GREEN}${BOLD}╚════════════════════════════════════════════════════════════════╝${RESET}"
+exit 0

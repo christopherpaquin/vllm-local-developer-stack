@@ -20,8 +20,28 @@
 | Quantization | AWQ (4-bit activation-aware) |
 | Context | 16,384 tokens (capped for KV cache budget) |
 
+## Deployment Scope
+
+This repository deploys a single-node vLLM OpenAI-compatible API server for use on a private homelab network.
+
+The intended use case is:
+
+- Run vLLM on one GPU-equipped Ubuntu host
+- Expose the vLLM API on the private LAN
+- Connect coding tools such as Continue in VS Code
+- Optionally connect a local web UI for direct chat interaction
+
+This repo does not currently target:
+
+- Multi-node vLLM
+- Ray-based distributed inference
+- Kubernetes
+- Public internet exposure
+- Production authentication or TLS
+
 ## Table of Contents
 
+- [Deployment Scope](#deployment-scope)
 - [Repository Structure](#repository-structure)
 - [Deploying](#deploying)
   - [1. Configure `deploy/.env`](#1-configure-deployenv)
@@ -31,6 +51,7 @@
 - [API Usage](#api-usage)
 - [Tuning Reference](#tuning-reference)
 - [Server Management](#server-management)
+- [Open WebUI Support (Optional)](#open-webui-support-optional)
 - [Security Notes](#security-notes)
 - [Development & Code Quality](#development--code-quality)
 - [Editor Integration: VS Code Continue Extension](#editor-integration-vs-code-continue-extension)
@@ -410,6 +431,92 @@ sudo bash scripts/deploy/deploy.sh   # Re-tunes and regenerates the override fil
 # Check container health
 docker inspect --format='{{.State.Health.Status}}' vllm-coder-server
 ```
+
+## Open WebUI Support (Optional)
+
+This repository includes optional support for [Open WebUI](https://github.com/open-webui/open-webui), allowing you to interact with the hosted vLLM model through a beautiful ChatGPT-like browser interface.
+
+### Key Features
+- **Browser Access**: Use the model from any device (phone, laptop, tablet) on your local network.
+- **Optional & Disabled by Default**: Kept disabled by default (`ENABLE_OPEN_WEBUI=false`) to preserve the core vLLM-only focus.
+- **Data Persistence**: Open WebUI's database, user accounts, and chat history are saved in a persistent Docker volume, preserving your data across container restarts, redeployments, and normal `stop.sh` operations.
+- **Auto-Boot**: Starts automatically at host reboot alongside vLLM when enabled.
+
+### Configuration
+
+All Open WebUI settings live in your `deploy/.env` file. Copy these values from `deploy/.env.example` if they are not already in your configuration:
+
+```env
+# Enable Open WebUI deployment (true/false)
+ENABLE_OPEN_WEBUI=true
+
+# Port on the host network where Open WebUI will listen
+OPEN_WEBUI_PORT=3000
+
+# Subnet CIDR of your private LAN to restrict firewall access (optional)
+# Example: LAN_CIDR=10.1.10.0/24
+LAN_CIDR=10.1.10.0/24
+```
+
+### Deployment
+
+Simply set `ENABLE_OPEN_WEBUI=true` in `deploy/.env` and run the deployment script:
+
+```bash
+sudo bash scripts/deploy/deploy.sh
+```
+
+The script will automatically detect that Open WebUI is enabled, perform port availability checks, open UFW/firewalld rules (restricted to `LAN_CIDR` if set), launch the container stack, and validate that both vLLM and Open WebUI are running and configured with their restart policies.
+
+After successful deployment, the script outputs the connection URLs:
+```text
+vLLM API      : http://10.1.10.17:8000/v1
+Open WebUI    : http://10.1.10.17:3000
+```
+
+> [!NOTE]
+> On the first run of Open WebUI, you will need to sign up to create the admin account. This account is entirely local and does not send any data outside your network. Since this setup is intended for a trusted home LAN, there is no TLS or external authentication configured by default.
+
+### Verification & Smoke Testing
+
+To verify both services are running and accessible from either the host itself or another LAN client:
+
+```bash
+# Run the validation smoke test
+bash scripts/deploy/smoke-test.sh
+```
+
+You can also pass overrides to verify connectivity from another machine on your LAN:
+```bash
+# Usage: bash scripts/deploy/smoke-test.sh [host-ip] [vllm-port] [open-webui-port] [enable-webui]
+bash scripts/deploy/smoke-test.sh 10.1.10.17 8000 3000 true
+```
+
+The smoke test validates:
+1. vLLM `/v1/models` endpoint responds successfully.
+2. Open WebUI HTTP endpoint responds on the configured port.
+3. Both containers are configured with `unless-stopped` (or your configured) restart policies.
+
+### Teardown and Data Preservation
+
+To stop the services and release GPU VRAM:
+```bash
+bash scripts/deploy/stop.sh
+```
+This stops both vLLM and Open WebUI containers. **Your Open WebUI chat history, user accounts, and settings are preserved.**
+
+To perform a deep-clean and delete all Open WebUI data/volumes, pass the `--purge` flag:
+```bash
+# WARNING: This deletes the Open WebUI database/volume permanently!
+bash scripts/deploy/stop.sh --purge
+```
+
+### Troubleshooting
+
+- **Container fails to start or port already in use**: The deployment script checks port availability and fails-fast. If the port is in use, verify with `ss -tlnp` (as root) or configure a different `OPEN_WEBUI_PORT` in `deploy/.env`.
+- **Cannot reach Open WebUI from another LAN host**: Ensure `OPEN_WEBUI_HOST` is set to `0.0.0.0` (all interfaces) in `deploy/.env`. Verify that the firewall (UFW/firewalld) is allowing the port and that `LAN_CIDR` matches your client's subnet.
+- **Open WebUI cannot reach vLLM**: Open WebUI connects to vLLM inside the Docker network. Ensure `OPEN_WEBUI_OPENAI_API_BASE_URL` in `deploy/.env` points to `http://vllm:8000/v1` (using the container service name `vllm` rather than `localhost`).
+- **Services not starting after reboot**: Check if the Docker service is enabled to start at boot (`systemctl is-enabled docker`). Verify the restart policies in `deploy/.env` (`VLLM_RESTART_POLICY` and `OPEN_WEBUI_RESTART_POLICY`) are set to `unless-stopped` or `always`.
 
 ## Security Notes
 
