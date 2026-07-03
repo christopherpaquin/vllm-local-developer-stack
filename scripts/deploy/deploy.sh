@@ -259,7 +259,6 @@ set -u
 FINAL_TP="${TENSOR_PARALLEL_SIZE:-2}"
 FINAL_GPU_UTIL="${GPU_MEMORY_UTILIZATION:-0.90}"
 FINAL_CTX="${MAX_MODEL_LEN:-16384}"
-FINAL_SWAP="${SWAP_SPACE:-4}"
 FINAL_QUANT="${QUANTIZATION:-awq}"
 
 info "Tensor parallel size    : ${FINAL_TP}"
@@ -320,11 +319,10 @@ services:
       --quantization           ${FINAL_QUANT}
       --max-model-len          ${FINAL_CTX}
       --gpu-memory-utilization ${FINAL_GPU_UTIL}
-      --swap-space             ${FINAL_SWAP}
       --host                   0.0.0.0
       --port                   8000
       --served-model-name      ${U_SERVED_NAME}
-      --disable-log-requests
+      --no-enable-log-requests
 ${OPT_ARGS}
 YAML_EOF
 
