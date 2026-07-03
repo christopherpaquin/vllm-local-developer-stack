@@ -173,6 +173,19 @@ else
 fi
 
 # --- Verify NVIDIA runtime is registered in Docker daemon.json ---------------
+# jq is a hard dependency of this check (below) but is normally only
+# installed in STEP 4 — install it here first if it's missing so a fresh,
+# minimal Ubuntu install doesn't abort on "jq: command not found".
+if ! command -v jq &>/dev/null; then
+  warn "jq not found (required to check/register the NVIDIA Docker runtime)."
+  if confirm "Install jq now?"; then
+    apt-get update -qq
+    apt-get install -y jq
+  else
+    fail "jq is required to configure the NVIDIA Docker runtime. Install it manually, or re-run and confirm."
+  fi
+fi
+
 DAEMON_JSON="/etc/docker/daemon.json"
 info "Verifying NVIDIA runtime is registered in ${DAEMON_JSON}..."
 

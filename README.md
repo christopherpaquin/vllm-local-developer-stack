@@ -42,6 +42,7 @@
 vllm-containerized-deploy/
 ├── .gitignore                          # Ignores WORKLOG.md, deploy/.env, generated override files, benchmark results
 ├── .pre-commit-config.yaml             # Pre-commit framework configuration
+├── .secrets.baseline                   # detect-secrets baseline — known false positives
 ├── README.md
 ├── git-hooks/
 │   └── check-commit-msg-secrets.py     # commit-msg hook: scans commit messages for secrets
@@ -97,15 +98,16 @@ installation and enabling the Docker service both need it):
 |------|--------------|-----------|
 | 1 | Load and validate `deploy/.env` | ✅ Aborts if `.env` is missing |
 | 2 | Resolve `BIND_HOST` (auto-detects your LAN IP if unset) | — |
-| 3 | Run `install-prereqs.sh` — drivers, Docker, nvidia-container-toolkit (idempotent; prompts before installing anything missing, never touches what's already there) | ✅ |
-| 4 | Run `validate-system.sh` — GPU ↔ Docker connectivity, PCIe link quality | ✅ |
-| 5 | Run `check-bottlenecks.sh` — performance advisory | ⚠️ Never blocks |
-| 6 | Run `tune-inference.sh` — updates only the GPU-tuned keys in `deploy/.env` in place, diffing against any existing values first | ✅ |
-| 7 | Re-apply your user-set values on top (your settings always win over auto-tuning) | — |
-| 8 | Generate `docker-compose.override.yml` with the fully-resolved vLLM command | — |
-| 9 | Ensure `docker.service` is enabled at boot, so the container (`restart: unless-stopped`) comes back up after a host reboot, not just a plain restart | — |
-| 10 | `docker compose up -d` | — |
-| 11 | Monitor startup — VRAM telemetry + log tailing until the server reports ready, or an OOM is detected | — |
+| 3 | If `BIND_HOST` is a non-loopback address (e.g. `10.1.10.17`, `192.168.0.x`), check for an active firewall (`ufw`/`firewalld`) and open the API port if it isn't already allowed; if no firewall is active, or `BIND_HOST` is `127.0.0.1`, skip — nothing to do | — |
+| 4 | Run `install-prereqs.sh` — drivers, Docker, nvidia-container-toolkit (idempotent; prompts before installing anything missing, never touches what's already there) | ✅ |
+| 5 | Run `validate-system.sh` — GPU ↔ Docker connectivity, PCIe link quality | ✅ |
+| 6 | Run `check-bottlenecks.sh` — performance advisory | ⚠️ Never blocks |
+| 7 | Run `tune-inference.sh` — updates only the GPU-tuned keys in `deploy/.env` in place, diffing against any existing values first | ✅ |
+| 8 | Re-apply your user-set values on top (your settings always win over auto-tuning) | — |
+| 9 | Generate `docker-compose.override.yml` with the fully-resolved vLLM command | — |
+| 10 | Ensure `docker.service` is enabled at boot, so the container (`restart: unless-stopped`) comes back up after a host reboot, not just a plain restart | — |
+| 11 | `docker compose up -d` | — |
+| 12 | Monitor startup — VRAM telemetry + log tailing until the server reports ready, or an OOM is detected | — |
 
 A single successful run leaves you with a running, health-checked server at
 `http://<BIND_HOST>:<PORT>/v1`. If you want to run any of these steps
@@ -414,6 +416,10 @@ docker inspect --format='{{.State.Health.Status}}' vllm-coder-server
 - The server binds to `0.0.0.0` on all interfaces by default. If running on
   a network-accessible machine, set `BIND_HOST=127.0.0.1` in `deploy/.env`
   to restrict it to localhost, or add a firewall rule.
+- If `BIND_HOST` is set to a LAN address, `deploy.sh` opens the API port on
+  `ufw`/`firewalld` automatically (only if one of them is active — it never
+  installs or enables a firewall for you). It only ever opens the single
+  `PORT` from `deploy/.env`, never a broad range.
 - vLLM does not enforce API key authentication by default. Add
   `--api-key <secret>` to the command in `docker-compose.yml` (or via
   `docker-compose.override.yml`) to enable it.
@@ -440,7 +446,7 @@ committed.
 **Security & secret detection**
 
 - `detect-private-key` — checks for the presence of private keys
-- `gitleaks` — scans staged changes for hardcoded secrets, API keys, or credentials using [Gitleaks](https://github.com/gitleaks/gitleaks)
+- `detect-secrets` — scans staged changes for hardcoded secrets, API keys, or credentials using [detect-secrets](https://github.com/Yelp/detect-secrets) (no account/registration required, unlike some hosted secret-scanning services). Known false positives (e.g. the literal placeholder `api_key="dummy"` used since vLLM doesn't enforce API keys by default) are tracked in `.secrets.baseline` — if you intentionally add a new one, regenerate it with `detect-secrets scan > .secrets.baseline` and mark it as a false positive.
 - **Custom commit message scanner** — `git-hooks/check-commit-msg-secrets.py` scans Git commit messages for secrets (e.g. AWS keys, Slack tokens, high-entropy API keys) during the `commit-msg` hook phase
 
 ### Manual Verification

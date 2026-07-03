@@ -18,18 +18,21 @@
 # What this does, in order:
 #   1. Load and validate deploy/.env
 #   2. Resolve BIND_HOST (auto-detect if not set)
-#   3. Run install-prereqs.sh   — idempotent; skips already-satisfied steps
-#   4. Run validate-system.sh   — GPU + Docker connectivity; blocks on failure
-#   5. Run check-bottlenecks.sh — advisory performance scan; never blocks
-#   6. Run tune-inference.sh    — updates only the GPU-tuned keys in deploy/.env
-#   7. Re-apply user vars on top of tuned .env (user settings always win)
-#   8. Generate docker-compose.override.yml with fully-resolved vLLM command
+#   3. If BIND_HOST is a non-loopback address, check for an active firewall
+#      (ufw or firewalld) and open the API port if it isn't already allowed;
+#      if no firewall is active, skip — there's nothing to configure
+#   4. Run install-prereqs.sh   — idempotent; skips already-satisfied steps
+#   5. Run validate-system.sh   — GPU + Docker connectivity; blocks on failure
+#   6. Run check-bottlenecks.sh — advisory performance scan; never blocks
+#   7. Run tune-inference.sh    — updates only the GPU-tuned keys in deploy/.env
+#   8. Re-apply user vars on top of tuned .env (user settings always win)
+#   9. Generate docker-compose.override.yml with fully-resolved vLLM command
 #      (optional features like speculative decoding wired in only if set)
-#   9. Ensure the Docker service is enabled at boot, so the container (which
+#  10. Ensure the Docker service is enabled at boot, so the container (which
 #      has restart: unless-stopped) comes back up automatically after a
 #      host reboot — not just after a plain container/daemon restart
-#  10. Launch via docker compose up -d
-#  11. Monitor startup: VRAM telemetry + log tailing until ready or OOM
+#  11. Launch via docker compose up -d
+#  12. Monitor startup: VRAM telemetry + log tailing until ready or OOM
 # =============================================================================
 set -euo pipefail
 
@@ -54,6 +57,12 @@ set_env_var() {
   fi
 }
 
+# True if the given IPv4 address is loopback-only (127.0.0.0/8) and
+# therefore never reachable from another machine on the network.
+is_loopback() {
+  [[ "$1" =~ ^127\. ]]
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DEPLOY_DIR="${REPO_ROOT}/deploy"
@@ -76,7 +85,7 @@ fi
 # =============================================================================
 # STEP 1 — Load deploy/.env
 # =============================================================================
-step "STEP 1/7 — Loading Configuration"
+step "STEP 1/8 — Loading Configuration"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
   echo -e ""
@@ -121,7 +130,7 @@ info "HF cache      : ${U_HF_CACHE}"
 # =============================================================================
 # STEP 2 — Resolve BIND_HOST
 # =============================================================================
-step "STEP 2/7 — Resolving Network Bind Address"
+step "STEP 2/8 — Resolving Network Bind Address"
 
 if [[ -z "${U_BIND_HOST}" ]]; then
   warn "BIND_HOST not set in deploy/.env — auto-detecting primary external IP..."
@@ -151,9 +160,63 @@ fi
 info "API will be reachable at: http://${U_BIND_HOST}:${U_PORT}/v1"
 
 # =============================================================================
-# STEP 3 — Prerequisites, system validation, and performance advisory
+# STEP 3 — Firewall check (only relevant when reachable from the network)
 # =============================================================================
-step "STEP 3/7 — System Checks"
+step "STEP 3/8 — Checking Firewall Rules"
+
+if is_loopback "${U_BIND_HOST}"; then
+  info "BIND_HOST=${U_BIND_HOST} is loopback-only — not reachable from the network. Skipping firewall check."
+
+elif command -v ufw &>/dev/null && ufw status | grep -q "^Status: active"; then
+  info "ufw is active — checking inbound/outbound rules for ${U_PORT}/tcp..."
+
+  # Standard `ufw allow <port>` rules are inbound and show up as, e.g.:
+  #   8000/tcp                   ALLOW       Anywhere
+  if ufw status | grep -qE "^${U_PORT}(/tcp)?[[:space:]]+ALLOW([[:space:]]|$)"; then
+    ok "ufw already allows inbound traffic on ${U_PORT}/tcp."
+  else
+    warn "ufw is active but does not allow inbound traffic on ${U_PORT}/tcp. Adding rule..."
+    ufw allow in "${U_PORT}/tcp" comment "vLLM API (added by deploy.sh)"
+    ok "Added: ufw allow in ${U_PORT}/tcp"
+  fi
+
+  # Most ufw installs default to "allow outgoing", so outbound is already
+  # open. Only add an explicit rule if the default policy actually denies it.
+  if ufw status verbose | grep -qE "Default:.*deny \(outgoing\)"; then
+    # Explicit outbound rules print with reversed columns, e.g.:
+    #   Anywhere                   ALLOW OUT   8000/tcp
+    if ufw status | grep -qE "ALLOW OUT.*${U_PORT}/tcp"; then
+      ok "ufw already allows outbound traffic on ${U_PORT}/tcp."
+    else
+      warn "ufw's default outgoing policy is deny. Adding an explicit outbound allow rule..."
+      ufw allow out "${U_PORT}/tcp" comment "vLLM API (added by deploy.sh)"
+      ok "Added: ufw allow out ${U_PORT}/tcp"
+    fi
+  else
+    ok "ufw's default outgoing policy already allows outbound traffic — no outbound rule needed."
+  fi
+
+elif command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld; then
+  info "firewalld is active — checking inbound rule for ${U_PORT}/tcp..."
+
+  if firewall-cmd --query-port="${U_PORT}/tcp" &>/dev/null; then
+    ok "firewalld already allows traffic on ${U_PORT}/tcp."
+  else
+    warn "firewalld is active but does not allow ${U_PORT}/tcp. Adding rule..."
+    firewall-cmd --permanent --add-port="${U_PORT}/tcp"
+    firewall-cmd --reload
+    ok "Added: firewall-cmd --add-port=${U_PORT}/tcp (permanent)"
+  fi
+  info "firewalld's default zone permits outbound traffic — no separate outbound rule needed."
+
+else
+  info "No active firewall (ufw/firewalld) detected — nothing to configure."
+fi
+
+# =============================================================================
+# STEP 4 — Prerequisites, system validation, and performance advisory
+# =============================================================================
+step "STEP 4/8 — System Checks"
 
 info "Running install-prereqs.sh (idempotent — skips already-satisfied steps)..."
 bash "${SCRIPT_PREREQS}/install-prereqs.sh"
@@ -165,9 +228,9 @@ info "Running check-bottlenecks.sh (performance advisory — non-blocking)..."
 bash "${SCRIPT_TUNING}/check-bottlenecks.sh" || true
 
 # =============================================================================
-# STEP 4 — GPU-tuned configuration
+# STEP 5 — GPU-tuned configuration
 # =============================================================================
-step "STEP 4/7 — Generating Tuned GPU Configuration"
+step "STEP 5/8 — Generating Tuned GPU Configuration"
 
 info "Running tune-inference.sh (detects GPU topology, writes deploy/.env)..."
 # Export user's model so tune-inference.sh respects it instead of using its default
@@ -204,9 +267,9 @@ info "GPU memory utilization  : ${FINAL_GPU_UTIL}"
 info "Max context length      : ${FINAL_CTX} tokens"
 
 # =============================================================================
-# STEP 5 — Generate docker-compose.override.yml
+# STEP 6 — Generate docker-compose.override.yml
 # =============================================================================
-step "STEP 5/7 — Building Compose Override"
+step "STEP 6/8 — Building Compose Override"
 
 # The override is regenerated on every deploy run so optional features stay
 # in sync with whatever is in deploy/.env at deploy time.
@@ -244,7 +307,7 @@ fi
 cat > "${OVERRIDE_FILE}" << YAML_EOF
 # =============================================================================
 # docker-compose.override.yml — AUTO-GENERATED by scripts/deploy.sh
-# DO NOT EDIT BY HAND. Re-run 'bash scripts/deploy.sh' to regenerate.
+# DO NOT EDIT BY HAND. Re-run 'sudo bash scripts/deploy/deploy.sh' to regenerate.
 # This file is gitignored and must not be committed.
 # =============================================================================
 services:
@@ -269,9 +332,9 @@ ok "docker-compose.override.yml written."
 info "Port binding  : ${U_BIND_HOST}:${U_PORT} → container:8000"
 
 # =============================================================================
-# STEP 6 — Ensure boot persistence (Ubuntu / systemd)
+# STEP 7 — Ensure boot persistence (Ubuntu / systemd)
 # =============================================================================
-step "STEP 6/7 — Ensuring Boot Persistence"
+step "STEP 7/8 — Ensuring Boot Persistence"
 
 # docker-compose.yml sets `restart: unless-stopped` on the vllm service, so
 # once the Docker daemon comes up, Docker restarts the container for us.
@@ -288,9 +351,9 @@ else
 fi
 
 # =============================================================================
-# STEP 7 — Launch and monitor
+# STEP 8 — Launch and monitor
 # =============================================================================
-step "STEP 7/7 — Launching vLLM Server"
+step "STEP 8/8 — Launching vLLM Server"
 
 CONTAINER_NAME="vllm-coder-server"
 
