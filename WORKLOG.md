@@ -2410,3 +2410,33 @@ No README.md changes made this session — still holding off until the model-swi
    - *Status*: Complete. Executed `bash scripts/deploy/setup-vscode-chat.sh 10.1.10.17:8000 --yes`.
    - *Change*: Subtracted `2048` tokens of safety headroom from the `MAX_MODEL_LEN=16384` budget to set `"maxInputTokens": 14336`. Also fixed a comparison bug in `setup-vscode-chat.sh`'s `already_configured` check that was comparing against the raw `max_tokens` instead of the budgeted `max_input_tokens`.
    - *Reasoning*: Because of minor token counting differences between VS Code's internal tokenizer and vLLM's Qwen tokenizer, not leaving any safety headroom caused VS Code Copilot to compile prompts that slightly exceeded the server's context limit (e.g. sending 16,385 tokens), leading to `400 Bad Request` failures on initial prompts. Setting it to `14336` (14K) resolves this, leaving ample space for tokenizer discrepancies and output generation.
+
+---
+
+## 2026-07-04 — Development Agent (Antigravity) — Zed IDE Integration & VS Code Native Chat Decommission
+
+### Changes & Reasoning:
+1. **Decommissioned VS Code Native Chat Setup**:
+   - *Target File*: [scripts/deploy/setup-vscode-chat.sh](file:///home/cpaquin/Workspace/Git/vllm-containerized-deploy/scripts/deploy/setup-vscode-chat.sh)
+   - *Change*: Deleted the setup script.
+   - *Reasoning*: VS Code Native Copilot/Chat consistently failed under heavy context sizes due to token limit calculations. Since Zed IDE is fully operational and is the primary IDE, VS Code native chat has been decommissioned.
+2. **Logged README Update Directives for the Documentation Agent**:
+   - *Context*: Documentation changes needed in `README.md` to reflect the decommissioning of VS Code native chat and the addition of Zed IDE.
+
+### Action Items for the Documentation Agent (README.md Updates):
+1. **Remove VS Code Native Chat Section**:
+   - Locate and completely delete the **VS Code Native Chat** section under client configuration in `README.md`.
+   - Remove any references to `setup-vscode-chat.sh` or `chatLanguageModels.json`.
+2. **Add Zed IDE Configuration Section**:
+   - Add a new section for **Zed IDE** client setup under the IDE Integrations list.
+   - **Step 1: Run the configuration script**:
+     ```bash
+     bash scripts/deploy/setup-zed.sh [vllm-host-ip:port]
+     ```
+     *(This automatically configures `~/.config/zed/settings.json` with the custom `api_url` and 14B model details).*
+   - **Step 2: Set the Keychain API Key**:
+     - Instruct the user to open Zed.
+     - Open the LLM Providers settings screen (via the model selector dropdown in the bottom right of the assistant panel → click **Configure...**, or via `Ctrl+Shift+A` / `agent: settings` command palette).
+     - Locate the **OpenAI** provider section and enter **`dummy`** in the API Key input field (since vLLM is a public server, any dummy string works, but Zed requires a keychain placeholder to allow custom requests).
+3. **Update Tagline &Spec Tables**:
+   - Ensure tagline and specifications match Qwen 14B and a context limit of `16384` (not 32768, which was reduced to resolve the display server sampler VRAM OOM).
