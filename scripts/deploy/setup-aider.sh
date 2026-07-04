@@ -275,7 +275,8 @@ if os.path.exists(config_path):
 keys_to_update = {
     "openai-api-base": api_base,
     "openai-api-key": api_key,
-    "model": model_name
+    "model": model_name,
+    "edit-format": "diff"
 }
 
 updated_keys = set()

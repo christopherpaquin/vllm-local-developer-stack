@@ -2563,3 +2563,18 @@ Same roadmap as before: `lib/common.sh`, `setup-continue.sh` JSON crash, `instal
    - Delete the `### Cline CLI` subsection completely from `README.md`.
    - Remove `setup-cline-cli.sh` and `.clinerules` from the Repository Structure tree block.
    - Remove `Cline CLI` from the Table of Contents.
+
+---
+
+## 2026-07-04 — Development Agent (Antigravity) — Aider File Writing Fix & Zed Usage Clarification
+
+### Changes & Reasoning:
+1. **Configured Aider Edit Format**:
+   - *Target File*: [scripts/deploy/setup-aider.sh](file:///home/cpaquin/Workspace/Git/vllm-containerized-deploy/scripts/deploy/setup-aider.sh)
+   - *Change*: Added `"edit-format": "diff"` to the generated `~/.aider.conf.yml` configurations.
+   - *Reasoning*: Because local models like Qwen are not natively recognized by Aider's built-in model registry, Aider defaults to a read-only `chat` mode (where it only prints code snippets to stdout and refuses to edit files). By forcing `edit-format: diff` in the config file, Aider instructs the model to provide unified diff blocks, which Aider's parser successfully intercepts and writes directly to disk.
+2. **Executed Aider Update**:
+   - *Status*: Re-ran `bash scripts/deploy/setup-aider.sh 10.1.10.17:8000 -y` to successfully apply the new `edit-format: diff` configuration to the user's global `~/.aider.conf.yml`.
+3. **Clarified Zed IDE Integration**:
+   - Checked `~/.config/zed/settings.json` and verified the local model configuration is complete and correct.
+   - Clarified that Zed's **Assistant Panel** (`Ctrl+Enter`) acts as a general chat window and only yields copy-paste blocks. To write code directly to the active file, the user should highlight the target lines and invoke the **Inline Assistant** using **`Ctrl+I`**.
