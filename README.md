@@ -605,25 +605,6 @@ The setup script injects the vLLM endpoint into `~/.continue/config.yaml` on the
 If the server isn't reachable yet when you run this from a remote
 workstation, it falls back to the default HuggingFace model ID — re-run it
 once the server is up for an accurate config.
-
-
-## IDE Integration: VS Code Native Chat
-
-VS Code's native Copilot/Chat interface supports connecting to custom endpoints. You can run the setup script to register your local vLLM server:
-
-```bash
-# Run interactively (will prompt to use IP/port from .env if present, or let you enter one manually):
-bash scripts/deploy/setup-vscode-chat.sh
-
-# Or pass the host's BIND_HOST:PORT directly as an argument:
-bash scripts/deploy/setup-vscode-chat.sh 192.168.1.50:8000
-```
-
-This script:
-1. Resolves the vLLM server address (prompting, reading from `scripts/deploy/.env`, or using the command-line argument).
-2. Updates or creates `~/.config/Code/User/chatLanguageModels.json` to register the local server as a custom endpoint vendor, avoiding duplicates if already configured.
-3. Reload VS Code to enable selecting the local vLLM model directly in the native chat UI.
-
 ## Client Integration: Aider
 
 You can also use [Aider](https://aider.chat) as a command-line coding assistant powered by the vLLM instance. A setup script is provided to automate Aider installation and configuration.
