@@ -600,6 +600,24 @@ If the server isn't reachable yet when you run this from a remote
 workstation, it falls back to the default HuggingFace model ID — re-run it
 once the server is up for an accurate config.
 
+## Client Integration: Aider
+
+You can also use [Aider](https://aider.chat) as a command-line coding assistant powered by the vLLM instance. A setup script is provided to automate Aider installation and configuration.
+
+```bash
+bash scripts/deploy/setup-aider.sh
+```
+
+This script:
+1. Detects if Aider is installed. If it is not, it stops to confirm if you want to install it (supporting installation via `pipx` or `pip`).
+2. Reads the vLLM endpoint configuration from `scripts/deploy/.env` (using the defined `BIND_HOST` and `PORT`).
+3. Safely updates or creates Aider configuration files (`.aider.conf.yml` at the project root or `~/.aider.conf.yml` in your home directory) to use the local vLLM endpoint, specifically patching only the OpenAI-compatible API base URL, API key, and model parameters.
+
+Once configured, simply run:
+```bash
+aider
+```
+
 ## License
 
 MIT
