@@ -190,24 +190,29 @@ fi
 # Qwen2.5-Coder native context is 128K, but KV cache is O(n^2) per token.
 # On 24 GiB total, cap at 16384 to prevent KV cache OOM on long sessions.
 # Each KV cache token for Qwen2.5-32B-AWQ ~ 0.9 MB across the cluster.
-if [[ "${TOTAL_VRAM_MiB}" -le 24576 ]]; then
-  # If we have 12 GiB cards running a 32B model, we must drop context to 8192
-  # to allow enough memory for the KV cache blocks.
-  if [[ "${PRIMARY_VRAM_MiB}" -le 13312 ]] && [[ "${MODEL}" =~ 32[bB] ]]; then
-    MAX_MODEL_LEN=6144
-    info "12 GiB cards running 32B model. Capping MAX_MODEL_LEN=${MAX_MODEL_LEN} to avoid KV Cache memory allocation failure."
-  else
-    MAX_MODEL_LEN=16384
-    info "Total VRAM ≤ 24 GiB. Capping MAX_MODEL_LEN=${MAX_MODEL_LEN} to protect KV cache budget."
-  fi
-elif [[ "${TOTAL_VRAM_MiB}" -le 49152 ]]; then
-  # 24–48 GiB range
-  MAX_MODEL_LEN=32768
-  info "Total VRAM 24–48 GiB. Setting MAX_MODEL_LEN=${MAX_MODEL_LEN}."
+if [[ -n "${OLD_MAX_MODEL_LEN:-}" ]]; then
+  MAX_MODEL_LEN="${OLD_MAX_MODEL_LEN}"
+  info "Using existing MAX_MODEL_LEN=${MAX_MODEL_LEN} from scripts/deploy/.env (user override)."
 else
-  # 48+ GiB (e.g., A100 80G x2): allow up to native context
-  MAX_MODEL_LEN=65536
-  info "High-VRAM setup detected. Setting MAX_MODEL_LEN=${MAX_MODEL_LEN}."
+  if [[ "${TOTAL_VRAM_MiB}" -le 24576 ]]; then
+    # If we have 12 GiB cards running a 32B model, we must drop context to 8192
+    # to allow enough memory for the KV cache blocks.
+    if [[ "${PRIMARY_VRAM_MiB}" -le 13312 ]] && [[ "${MODEL}" =~ 32[bB] ]]; then
+      MAX_MODEL_LEN=6144
+      info "12 GiB cards running 32B model. Capping MAX_MODEL_LEN=${MAX_MODEL_LEN} to avoid KV Cache memory allocation failure."
+    else
+      MAX_MODEL_LEN=16384
+      info "Total VRAM ≤ 24 GiB. Capping MAX_MODEL_LEN=${MAX_MODEL_LEN} to protect KV cache budget."
+    fi
+  elif [[ "${TOTAL_VRAM_MiB}" -le 49152 ]]; then
+    # 24–48 GiB range
+    MAX_MODEL_LEN=32768
+    info "Total VRAM 24–48 GiB. Setting MAX_MODEL_LEN=${MAX_MODEL_LEN}."
+  else
+    # 48+ GiB (e.g., A100 80G x2): allow up to native context
+    MAX_MODEL_LEN=65536
+    info "High-VRAM setup detected. Setting MAX_MODEL_LEN=${MAX_MODEL_LEN}."
+  fi
 fi
 
 # --- Swap Space (KV Cache Offload) -------------------------------------------
