@@ -1,5 +1,0 @@
-# Cline Tool Calling Rules for Local Models
-To ensure tools are parsed and executed correctly by the Cline client:
-1. **XML Tool Calling Only**: You MUST invoke tools exclusively using the XML tag format defined in your system prompt (e.g., `<execute_command><command>ls -la</command></execute_command>` or `<read_file><path>filename</path></read_file>`).
-2. **No JSON Tool Calls**: DO NOT output raw JSON blocks (like `{"name": "run_commands", ...}`) or attempt to use OpenAI-style native tool-calling schemas, even if tool definitions are present in the API parameters.
-3. **Strict Syntax**: Ensure all XML tags are fully closed, correct, and placed in the text response as specified by the system instructions.

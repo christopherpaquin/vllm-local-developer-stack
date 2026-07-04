@@ -2517,3 +2517,47 @@ Roadmap carried forward: `lib/common.sh`, `setup-continue.sh` JSON crash, `insta
    - *Reasoning*: Prevents parsing failures in the Cline CLI. When Cline is configured with an OpenAI-compatible provider, it passes tool definitions via the API's `tools` parameter, prompting the model to output a JSON object. However, Cline's internal parser expects XML tags, leading it to output the tool call as raw text instead of executing it. The `.clinerules` instructs the model to override the JSON schema and output XML, which Cline parses correctly.
 3. **Executed Configuration**:
    - *Status*: Complete. Sourced and executed `bash scripts/deploy/setup-cline-cli.sh 10.1.10.17:8000` to configure the local Cline CLI.
+
+---
+
+## 2026-07-04 — Documentation Agent — Full Documentation Audit (Cline CLI, .clinerules)
+
+Asked to make sure "all documentation is up to date." Checked `git log`/`git status` first — commits `eefae2c` through `4c12db5` had landed since my last pass (Cline CLI setup script, `.clinerules`, and the user directly committing my prior README rewrite verbatim). Working tree was otherwise clean, so proceeded.
+
+### Discrepancy caught before writing: the two "Action Items for the Documentation Agent" entries above (2026-07-04, "Cline CLI Documentation Directives") describe a manual `cline auth` interactive flow — but the actual `setup-cline-cli.sh` script that was subsequently built doesn't do that at all. It writes `~/.cline/data/settings/providers.json` directly and non-interactively (same shape as `setup-zed.sh`/`setup-aider.sh`), registering both `openai` and `openai-compatible` provider entries with a `dummy` key and live-resolved model ID. Documented what the script actually does, not what the earlier action item described — the `cline auth` flow was superseded by the script and would mislead a reader into a manual process that isn't how this repo's automation actually works. Kept the "direct CLI flags for one-off tasks" item from the action list since that's independent of the setup script (describes `cline`'s own flag interface, not our automation).
+
+### Changes made:
+1. Added `### Cline CLI` subsection (after Aider) under `## Client & Editor Integrations`, describing the actual script behavior, a settings table matching the Zed/Continue/Aider style, and the one-off inline-flags usage.
+2. Added a `.clinerules` callout box in that subsection per the dev agent's item 5 — explains the XML-vs-JSON tool-calling mismatch and the launch-from-repo-root requirement, since skipping this silently breaks tool calling with no obvious error.
+3. Added `setup-cline-cli.sh` to the Repository Structure tree, and `.clinerules` itself (new root-level file, alongside `.gitignore`/`.pre-commit-config.yaml`/`.secrets.baseline`).
+4. Added `Cline CLI` to the Table of Contents.
+
+### Also verified (no changes needed):
+- `.pre-commit-config.yaml` hooks match the Development & Code Quality section's hook list exactly.
+- `deploy-artifacts/docker-compose.open-webui.yml` matches the Open WebUI section's env vars, volume, and restart-policy claims exactly.
+- No other untracked/uncommitted files in the working tree; no other stale `32b`/`32B`/old-repo-name/`setup-vscode-chat` references remain anywhere in `README.md`.
+
+### Still open (unchanged, not re-verified this session)
+Same roadmap as before: `lib/common.sh`, `setup-continue.sh` JSON crash, `install-prereqs.sh` dpkg detection ×2, `tune-inference.sh` TP-size gap for odd GPU counts, `stop.sh`/`teardown.sh` docker-inspect bug, `.env.example`'s dead optional variables not wired into `docker-compose.yml`. All out of scope for a doc-only pass.
+
+
+---
+
+## 2026-07-04 — Development Agent (Antigravity) — Transition to Native Server Tool Calling & .clinerules Removal
+
+### Changes & Reasoning:
+1. **Enabled Native Tool Calling on the Server**:
+   - *Target File*: [deploy-artifacts/docker-compose.yml](file:///home/cpaquin/Workspace/Git/vllm-containerized-deploy/deploy-artifacts/docker-compose.yml)
+   - *Change*: Removed custom chat template override (`chat_template.jinja`) and added `--enable-auto-tool-choice` flag to the vLLM launch parameters.
+   - *Reasoning*: Because Cline expects to use native OpenAI `tool_calls` when configured with an OpenAI-compatible provider, forcing XML formatting via `.clinerules` caused the client to ignore the model's text-based tool calls. By enabling `--enable-auto-tool-choice` on the server and removing the template override, Qwen 2.5 Coder successfully handles tool calling natively, returning structured JSON payloads inside the API's native `tool_calls` array, which Cline CLI executes perfectly.
+2. **Removed Rules and Custom Template Files**:
+   - *Target Files*: `.clinerules` and `deploy-artifacts/chat_template.jinja` (deleted).
+3. **Redeployed Server**:
+   - *Status*: Complete. Redeployed the container stack via `deploy.sh` and confirmed the server is UP, healthy, and accepting native tool choice calls.
+
+### Action Items for the Documentation Agent (README.md Updates):
+1. **Remove `.clinerules` References**:
+   - Delete the `.clinerules` callout box and references from the `### Cline CLI` subsection.
+   - Remove `.clinerules` from the Repository Structure tree block.
+2. **Document Native Tool Support**:
+   - Mention in the `### Cline CLI` section that the local vLLM stack has native tool calling fully enabled (`--enable-auto-tool-choice`), meaning tool execution (like file editing and terminal commands) works out-of-the-box with standard settings.
