@@ -2440,3 +2440,59 @@ No README.md changes made this session — still holding off until the model-swi
      - Locate the **OpenAI** provider section and enter **`dummy`** in the API Key input field (since vLLM is a public server, any dummy string works, but Zed requires a keychain placeholder to allow custom requests).
 3. **Update Tagline &Spec Tables**:
    - Ensure tagline and specifications match Qwen 14B and a context limit of `16384` (not 32768, which was reduced to resolve the display server sampler VRAM OOM).
+
+---
+
+## 2026-07-04 — Documentation Agent — README Overhaul (14B/Zed sync, rename, reorg)
+
+### Role Scope & Action
+Confirmed everything relevant was actually committed this time (`git status` clean, `git log` shows `af7d84e` through `3ba50ea` landed) before touching `README.md` — no more editing against working-tree diffs.
+
+Also actioned a direct user request: renamed the repo's display name in `README.md` from `vllm-containerized-deploy` to `vllm-local-developer-stack` (H1 title + the Repository Structure tree's root line). This is a documentation-only rename — the actual directory name and git remote were left untouched since the user only asked for the README name.
+
+### Completed the three action items logged above, plus my own two prior sessions' backlog:
+1. **VS Code Native Chat section**: never existed in `README.md` to begin with (it was already fully removed by an earlier commit, `451f861`, before this back-and-forth started) — item 1 was a no-op, confirmed rather than assumed.
+2. **Zed IDE section added** under a new consolidated `## Client & Editor Integrations` heading, with both action-item steps (setup script, then the `dummy` API-key placeholder via the Agent panel → Configure... / `Ctrl+Shift+A`), plus a settings table matching the style already used for Continue.
+3. **Tagline/spec table updated** to 14B model, `16,384` context — and cross-linked to a rewritten Display Server Impact section (see below) instead of just stating the number, since the *why* (display-server OOM at 0.90/32768) is genuinely useful troubleshooting context, not just trivia.
+4. Also fixed the six 32B-era stale references I'd found and deferred in my two prior entries (tagline, spec table, both API usage examples, tuning-table row, Continue's resolved-model example) — all now read 14B / `qwen2.5-coder-14b-awq` / `16384` consistently. The `MAX_MODEL_LEN=8192` OOM-recovery halving example needed no change — it already correctly halves the *current* `16384` default (my earlier revert had preserved it).
+5. Rewrote **Display Server Impact** to state, as fact rather than speculation, that the 14B model still OOM'd on a non-headless GPU 0 at `0.90`/`32768`, which is why the shipped defaults are `0.85`/`16384` — and added the reverse instruction (raise back to `0.90`/`32768` if GPU 0 is headless) so the note is actionable both ways.
+
+### Reorganization (per user request to look for reorg/formatting opportunities)
+- Consolidated the two previously separate, inconsistently-titled sections — `## IDE Integration: Continue Extension (VS Code & JetBrains)` (whose ToC entry didn't even match its own heading text — stale anchor, `#editor-integration-vs-code-continue-extension` vs. actual heading) and `## Client Integration: Aider` (missing from the ToC entirely) — into one `## Client & Editor Integrations` heading with `### Zed` / `### Continue (VS Code & JetBrains)` / `### Aider` subsections, ordered primary-IDE-first per the Development Agent's "Zed is the primary IDE" note above.
+- Moved that whole section up to sit right after **API Usage** (previously it was the very last section before License). Rationale: the natural flow is deploy → verify it works → hook up your editor → *then* get into tuning/server-management/security minutiae, which are reference material you return to later rather than day-one setup steps.
+- Rebuilt the Table of Contents from scratch against GitHub's actual anchor-slug rules (strip punctuation, lowercase, spaces→hyphens) rather than copying forward the old anchors, since at least two were already wrong (see above). Added the missing Aider entry and the new Zed/Client & Editor Integrations entries.
+- Updated the two "continue reading" cross-references in Manual Setup (Step 4) that pointed at the old section name/position.
+
+### Still open (unchanged from prior entries, not re-verified this session)
+Roadmap carried forward: `lib/common.sh`, `setup-continue.sh` JSON crash, `install-prereqs.sh` dpkg detection ×2, `tune-inference.sh` TP-size gap for odd GPU counts, `stop.sh`/`teardown.sh` docker-inspect bug, `.env.example`s dead optional variables not wired into `docker-compose.yml`. All out of scope for a doc-only pass — for a Development Agent.
+
+---
+
+## 2026-07-04 — Development Agent (Antigravity) — Cline CLI Documentation Directives
+
+### Changes & Reasoning:
+- *Context*: The user has chosen to install the Cline CLI manually and wants it documented alongside our other integrations in the repository.
+
+### Action Items for the Documentation Agent (README.md Updates):
+1. **Add Cline CLI Subsection**:
+   - Under `## Client & Editor Integrations`, add a new subsection for `### Cline CLI` (alongside Zed, Continue, and Aider).
+2. **Document Installation**:
+   - Install globally via npm:
+     ```bash
+     npm install -g cline
+     ```
+3. **Document Configuration via Interactive Auth**:
+   - Run the authentication utility:
+     ```bash
+     cline auth
+     ```
+   - Provide the configuration inputs for the prompt:
+     *   **API Provider**: Select `OpenAI Compatible`.
+     *   **Base URL**: `http://10.1.10.17:8000/v1`
+     *   **API Key**: `dummy` (any string works since the local server doesn't validate keys).
+     *   **Model ID**: `qwen2.5-coder-14b-awq`
+4. **Document Direct CLI Usage / Flags**:
+   - Explain that settings can also be passed inline for one-off tasks:
+     ```bash
+     cline --api-provider openai-compatible --api-url http://10.1.10.17:8000/v1 --model qwen2.5-coder-14b-awq "your task prompt here"
+     ```
