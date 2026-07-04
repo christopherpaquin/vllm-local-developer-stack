@@ -146,13 +146,13 @@ step "STEP 3/4 — Calculating Tuned Parameters"
 # --- Model Selection ---------------------------------------------------------
 # Respect MODEL if already set in environment (e.g. exported by deploy.sh or
 # pre-set in deploy/.env). Fall back to the recommended default for 24 GB VRAM:
-# Qwen2.5-Coder-32B-Instruct-AWQ — purpose-built for code generation, fits
+# Qwen2.5-Coder-14B-Instruct-AWQ — purpose-built for code generation, fits
 # comfortably on 2x RTX 3060 at AWQ quantization with TP=2.
-MODEL="${MODEL:-Qwen/Qwen2.5-Coder-32B-Instruct-AWQ}"
+MODEL="${MODEL:-Qwen/Qwen2.5-Coder-14B-Instruct-AWQ}"
 
 # Served model name alias — what API clients put in the "model" field.
 # Avoids the slash in the HF ID that breaks some OpenAI-compatible clients.
-SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-qwen2.5-coder-32b-awq}"
+SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-qwen2.5-coder-14b-awq}"
 
 # --- Tensor Parallelism -------------------------------------------------------
 # Always match GPU count for full topology coverage.
@@ -173,33 +173,41 @@ TENSOR_PARALLEL_SIZE="${GPU_COUNT}"
 # 12 GiB cards: use 90% to leave ~1.2 GiB headroom for CUDA overhead.
 # For larger cards (>16 GiB), 92% is safe. For smaller (<10 GiB), drop to 85%.
 
-if [[ "${PRIMARY_VRAM_MiB}" -le 10240 ]]; then
-  GPU_MEMORY_UTILIZATION="0.85"
-  warn "Small VRAM detected (<10 GiB). Setting GPU_MEMORY_UTILIZATION=0.85 conservatively."
-elif [[ "${PRIMARY_VRAM_MiB}" -le 13312 ]]; then
-  # ~12 GiB class (RTX 3060 / 4070)
-  GPU_MEMORY_UTILIZATION="0.90"
-  info "12 GiB class GPU detected. Setting GPU_MEMORY_UTILIZATION=0.90."
+if [[ -n "${OLD_GPU_MEMORY_UTILIZATION:-}" ]]; then
+  GPU_MEMORY_UTILIZATION="${OLD_GPU_MEMORY_UTILIZATION}"
+  info "Using existing GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION} from scripts/deploy/.env (user override)."
 else
-  # 16+ GiB class (A100, RTX 4090, etc.)
-  GPU_MEMORY_UTILIZATION="0.92"
-  info "Large VRAM GPU detected (>16 GiB). Setting GPU_MEMORY_UTILIZATION=0.92."
+  if [[ "${PRIMARY_VRAM_MiB}" -le 10240 ]]; then
+    GPU_MEMORY_UTILIZATION="0.85"
+    warn "Small VRAM detected (<10 GiB). Setting GPU_MEMORY_UTILIZATION=0.85 conservatively."
+  elif [[ "${PRIMARY_VRAM_MiB}" -le 13312 ]]; then
+    # ~12 GiB class (RTX 3060 / 4070)
+    GPU_MEMORY_UTILIZATION="0.90"
+    info "12 GiB class GPU detected. Setting GPU_MEMORY_UTILIZATION=0.90."
+  else
+    # 16+ GiB class (A100, RTX 4090, etc.)
+    GPU_MEMORY_UTILIZATION="0.92"
+    info "Large VRAM GPU detected (>16 GiB). Setting GPU_MEMORY_UTILIZATION=0.92."
+  fi
 fi
 
 # --- Max Model Length (Context Window) ---------------------------------------
 # Qwen2.5-Coder native context is 128K, but KV cache is O(n^2) per token.
 # On 24 GiB total, cap at 16384 to prevent KV cache OOM on long sessions.
-# Each KV cache token for Qwen2.5-32B-AWQ ~ 0.9 MB across the cluster.
+# Each KV cache token for Qwen2.5-32B-AWQ ~ 0.9 MB, and for Qwen2.5-14B-AWQ ~ 0.38 MB across the cluster.
 if [[ -n "${OLD_MAX_MODEL_LEN:-}" ]]; then
   MAX_MODEL_LEN="${OLD_MAX_MODEL_LEN}"
   info "Using existing MAX_MODEL_LEN=${MAX_MODEL_LEN} from scripts/deploy/.env (user override)."
 else
   if [[ "${TOTAL_VRAM_MiB}" -le 24576 ]]; then
-    # If we have 12 GiB cards running a 32B model, we must drop context to 8192
+    # If we have 12 GiB cards running a 32B model, we must drop context to 6208
     # to allow enough memory for the KV cache blocks.
     if [[ "${PRIMARY_VRAM_MiB}" -le 13312 ]] && [[ "${MODEL}" =~ 32[bB] ]]; then
-      MAX_MODEL_LEN=6144
+      MAX_MODEL_LEN=6208
       info "12 GiB cards running 32B model. Capping MAX_MODEL_LEN=${MAX_MODEL_LEN} to avoid KV Cache memory allocation failure."
+    elif [[ "${MODEL}" =~ 14[bB] ]]; then
+      MAX_MODEL_LEN=32768
+      info "12 GiB cards running 14B model. Setting MAX_MODEL_LEN=${MAX_MODEL_LEN}."
     else
       MAX_MODEL_LEN=16384
       info "Total VRAM ≤ 24 GiB. Capping MAX_MODEL_LEN=${MAX_MODEL_LEN} to protect KV cache budget."

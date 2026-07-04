@@ -770,10 +770,14 @@ fi
 
 # 4. Check vLLM API endpoint
 info "Querying vLLM API models endpoint..."
-if curl -sf "http://localhost:${U_PORT}/v1/models" >/dev/null; then
+VALIDATION_HOST="${U_BIND_HOST}"
+if [[ -z "${VALIDATION_HOST}" || "${VALIDATION_HOST}" == "0.0.0.0" ]]; then
+  VALIDATION_HOST="localhost"
+fi
+if curl -sf "http://${VALIDATION_HOST}:${U_PORT}/v1/models" >/dev/null; then
   ok "vLLM API endpoint is responding successfully."
 else
-  fail "vLLM API endpoint failed to respond at http://localhost:${U_PORT}/v1/models"
+  fail "vLLM API endpoint failed to respond at http://${VALIDATION_HOST}:${U_PORT}/v1/models"
 fi
 
 # 5. Optional Open WebUI validations
@@ -796,10 +800,14 @@ if [[ "${U_ENABLE_OPEN_WEBUI}" == "true" ]]; then
 
   # Check Open WebUI HTTP endpoint responds
   info "Querying Open WebUI HTTP endpoint..."
-  if curl -sf "http://localhost:${U_OPEN_WEBUI_PORT}" >/dev/null || curl -sfI "http://localhost:${U_OPEN_WEBUI_PORT}" >/dev/null; then
+  WEBUI_VALIDATION_HOST="${U_OPEN_WEBUI_HOST}"
+  if [[ -z "${WEBUI_VALIDATION_HOST}" || "${WEBUI_VALIDATION_HOST}" == "0.0.0.0" ]]; then
+    WEBUI_VALIDATION_HOST="localhost"
+  fi
+  if curl -sf "http://${WEBUI_VALIDATION_HOST}:${U_OPEN_WEBUI_PORT}" >/dev/null || curl -sfI "http://${WEBUI_VALIDATION_HOST}:${U_OPEN_WEBUI_PORT}" >/dev/null; then
     ok "Open WebUI endpoint is responding successfully."
   else
-    fail "Open WebUI HTTP endpoint failed to respond at http://localhost:${U_OPEN_WEBUI_PORT}"
+    fail "Open WebUI HTTP endpoint failed to respond at http://${WEBUI_VALIDATION_HOST}:${U_OPEN_WEBUI_PORT}"
   fi
 
   # Validate Open WebUI can reach vLLM container

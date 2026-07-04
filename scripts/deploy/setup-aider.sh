@@ -205,7 +205,7 @@ if [[ -n "${LIVE_MODEL}" ]]; then
   MODEL_ID="${LIVE_MODEL}"
   ok "Resolved model name from live server: ${MODEL_ID}"
 else
-  MODEL_ID="${MODEL_ID:-qwen2.5-coder-32b-awq}"
+  MODEL_ID="${MODEL_ID:-qwen2.5-coder-14b-awq}"
   warn "vLLM server is not reachable at ${VLLM_API_BASE}."
   warn "Using fallback model name: ${MODEL_ID}"
 fi

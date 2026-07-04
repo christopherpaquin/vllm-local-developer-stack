@@ -33,8 +33,8 @@ services:
 
     # -------------------------------------------------------------------------
     # Volumes
-    #   • HuggingFace model cache: avoids re-downloading the 32B model
-    #     on every container restart (~18 GiB for Qwen2.5-Coder-32B-AWQ)
+    #   • HuggingFace model cache: avoids re-downloading the model
+    #     on every container restart (~9 GiB for Qwen2.5-Coder-14B-AWQ)
     # -------------------------------------------------------------------------
     volumes:
       - type: bind
@@ -64,8 +64,7 @@ services:
       - ../scripts/deploy/.env
 
     environment:
-      # HuggingFace token — set HF_TOKEN in your shell env or .env if the
-      # model is gated. Qwen2.5-Coder-32B-Instruct-AWQ is public (not gated).
+      # model is gated. Qwen2.5-Coder-14B-Instruct-AWQ is public (not gated).
       - HF_TOKEN=${HF_TOKEN:-}
       # Disable HuggingFace progress bars in container logs (cleaner output)
       - HF_HUB_DISABLE_PROGRESS_BARS=1
@@ -88,7 +87,7 @@ services:
       --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION}
       --host                   0.0.0.0
       --port                   8000
-      --served-model-name      ${SERVED_MODEL_NAME:-qwen2.5-coder-32b-awq}
+      --served-model-name      ${SERVED_MODEL_NAME:-qwen2.5-coder-14b-awq}
       --no-enable-log-requests
 
     # -------------------------------------------------------------------------
@@ -109,7 +108,7 @@ services:
 
     # -------------------------------------------------------------------------
     # Shared memory: PyTorch DataLoader and NCCL require sufficient /dev/shm.
-    # 12 GiB is recommended for 32B models with tensor parallelism.
+    # 12 GiB is recommended for tensor parallel models.
     # -------------------------------------------------------------------------
     shm_size: '12gb'
 
