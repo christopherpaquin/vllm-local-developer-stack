@@ -2496,6 +2496,11 @@ Roadmap carried forward: `lib/common.sh`, `setup-continue.sh` JSON crash, `insta
      ```bash
      cline --api-provider openai-compatible --api-url http://10.1.10.17:8000/v1 --model qwen2.5-coder-14b-awq "your task prompt here"
      ```
+5. **Document the `.clinerules` File**:
+   - Explain that a [`.clinerules`](file:///.clinerules) file is placed in the repository root.
+   - Clarify that because Cline expects Anthropic-style XML tool-calling tags (e.g. `<execute_command>`) while OpenAI-compatible providers define tools in JSON schemas, local models can get confused and output unparsed JSON. The `.clinerules` file forces the model to override the JSON schema and output clean XML tags, ensuring the parser executes local tool calls successfully.
+   - Highlight that the user must launch the Cline CLI (or open VS Code) from the root of the repository to load the rules file.
+
 
 ---
 
