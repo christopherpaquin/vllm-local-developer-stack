@@ -566,33 +566,39 @@ Run every pre-commit check against all files at any time:
 pre-commit run --all-files
 ```
 
-## Editor Integration: VS Code Continue Extension
+## IDE Integration: Continue Extension (VS Code & JetBrains)
 
 This is a client-side setup step, separate from deploying, tuning, or
-benchmarking the server. Run it on **whichever workstation has VS Code and
-the [Continue](https://continue.dev) extension installed** — that machine
-does not need to be the one hosting vLLM. A common setup is a GPU host
-running the server on the LAN and one or more separate laptops/workstations
-each pointing their own VS Code at it.
+benchmarking the server. Run it on **whichever workstation has your IDE and
+the [Continue](https://continue.dev) extension installed** (e.g., VS Code or JetBrains IDEs like PyCharm/IntelliJ). That machine does not need to be the one hosting vLLM.
 
 ```bash
-# On the vLLM host itself (server reachable at localhost):
+# Run interactively (will prompt to use IP/port from .env if present, or let you enter one manually):
 bash scripts/deploy/setup-continue.sh
 
-# From any other workstation on the network — pass the host's BIND_HOST:PORT:
+# Or pass the host's BIND_HOST:PORT directly as an argument:
 bash scripts/deploy/setup-continue.sh 192.168.1.50:8000
 ```
 
-This injects the vLLM endpoint into `~/.continue/config.json` **on the
-machine you run it on**, as both a chat model and a tab-autocomplete model
-— creating the file with full defaults if it doesn't exist, or patching it
-safely (with backup) if it does. Reload VS Code afterward
-(`Ctrl+Shift+P` → **Developer: Reload Window**).
+### Supported IDEs
+
+#### 1. VS Code
+* Install the **Continue** extension from the VS Code Marketplace.
+* Run the `setup-continue.sh` script above to configure the endpoint.
+* Once the script finishes, reload the VS Code window (`Ctrl+Shift+P` → **Developer: Reload Window**).
+
+#### 2. JetBrains IDEs (PyCharm, IntelliJ IDEA, WebStorm, CLion, etc.)
+* Install the **Continue** plugin from the JetBrains Marketplace.
+* Run the `setup-continue.sh` script above. (Continue in JetBrains shares the same `~/.continue/config.json` global configuration path on Linux/macOS).
+* Restart your JetBrains IDE or click the gear icon in the Continue sidebar to refresh the configuration.
+
+### How it Works / Custom Configurations
+The setup script injects the vLLM endpoint into `~/.continue/config.yaml` on the machine you run it on, setting it as both the **chat model** and the **tab-autocomplete model**. It will create the file with full defaults if it doesn't exist, or patch it safely (with a backup) if it does.
 
 | Setting | Value |
 |---------|-------|
 | Provider | `openai` (OpenAI-compatible) |
-| API Base | `http://<host>:<port>/v1` (`localhost:8000` by default) |
+| API Base | `http://<host>:<port>/v1` |
 | Model | Resolved live from `GET /v1/models` if the server is reachable (typically `qwen2.5-coder-32b-awq`, matching `--served-model-name`) — falls back to `MODEL=` from `scripts/deploy/.env` with a warning if it isn't (only relevant when run on the vLLM host itself, since that's the only place `scripts/deploy/.env` exists) |
 | Autocomplete | Same resolved model, `max_tokens=512`, `temperature=0.05` |
 
@@ -600,18 +606,41 @@ If the server isn't reachable yet when you run this from a remote
 workstation, it falls back to the default HuggingFace model ID — re-run it
 once the server is up for an accurate config.
 
+
+## IDE Integration: VS Code Native Chat
+
+VS Code's native Copilot/Chat interface supports connecting to custom endpoints. You can run the setup script to register your local vLLM server:
+
+```bash
+# Run interactively (will prompt to use IP/port from .env if present, or let you enter one manually):
+bash scripts/deploy/setup-vscode-chat.sh
+
+# Or pass the host's BIND_HOST:PORT directly as an argument:
+bash scripts/deploy/setup-vscode-chat.sh 192.168.1.50:8000
+```
+
+This script:
+1. Resolves the vLLM server address (prompting, reading from `scripts/deploy/.env`, or using the command-line argument).
+2. Updates or creates `~/.config/Code/User/chatLanguageModels.json` to register the local server as a custom endpoint vendor, avoiding duplicates if already configured.
+3. Reload VS Code to enable selecting the local vLLM model directly in the native chat UI.
+
 ## Client Integration: Aider
 
 You can also use [Aider](https://aider.chat) as a command-line coding assistant powered by the vLLM instance. A setup script is provided to automate Aider installation and configuration.
 
 ```bash
+# Run interactively (will prompt to use IP/port from .env if present, or let you enter one manually):
 bash scripts/deploy/setup-aider.sh
+
+# Or pass the host's BIND_HOST:PORT directly as an argument:
+bash scripts/deploy/setup-aider.sh 192.168.1.50:8000
 ```
 
 This script:
 1. Detects if Aider is installed. If it is not, it stops to confirm if you want to install it (supporting installation via `pipx` or `pip`).
-2. Reads the vLLM endpoint configuration from `scripts/deploy/.env` (using the defined `BIND_HOST` and `PORT`).
+2. Resolves the vLLM server address (interactively prompting for IP and port, reading from `scripts/deploy/.env`, or using the command-line argument).
 3. Safely updates or creates Aider configuration files (`.aider.conf.yml` at the project root or `~/.aider.conf.yml` in your home directory) to use the local vLLM endpoint, specifically patching only the OpenAI-compatible API base URL, API key, and model parameters.
+4. Generates or updates `.aider.model.metadata.json` alongside your Aider config to register the correct context window size (based on the server's `MAX_MODEL_LEN`) and token cost structures, suppressing any "Unknown context window size and costs" warnings.
 
 Once configured, simply run:
 ```bash

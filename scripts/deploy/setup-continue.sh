@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
 # setup-continue.sh
-# Automated VS Code Continue extension hook.
-# Injects a vLLM endpoint into ~/.continue/config.json, creating the file
+# Automated IDE Continue extension hook.
+# Injects a vLLM endpoint into ~/.continue/config.yaml, creating the file
 # with full defaults if it doesn't already exist.
 #
-# Run this on whichever machine has VS Code + Continue installed — that is
+# Run this on whichever machine has your IDE + Continue installed — that is
 # not necessarily the machine hosting vLLM. On the vLLM host itself, no
 # argument is needed (defaults to localhost:8000). From any other
 # workstation on the network, pass that host's BIND_HOST:PORT:
@@ -25,21 +25,118 @@ warn()  { echo -e "${YELLOW}=== [⚠]  $* ===${RESET}"; }
 fail()  { echo -e "${RED}=== [✗]  $* ===${RESET}"; exit 1; }
 step()  { echo -e "\n${BOLD}──────────────────────────────────────────${RESET}"; echo -e "${BOLD}  $*${RESET}"; echo -e "${BOLD}──────────────────────────────────────────${RESET}"; }
 
+# --- Options -------------------------------------------------------------
+ASSUME_YES=false
+VLLM_HOST_ARG=""
+for arg in "$@"; do
+  case "${arg}" in
+    -y|--yes) ASSUME_YES=true ;;
+    -h|--help)
+      echo "Usage: bash scripts/deploy/setup-continue.sh [vllm-host] [-y|--yes]"
+      echo "  vllm-host   Optional host[:port] of the vLLM server."
+      echo "  -y, --yes   Auto-confirm prompts."
+      exit 0
+      ;;
+    -*) ;;
+    *) VLLM_HOST_ARG="${arg}" ;;
+  esac
+done
+
+confirm() {
+  local prompt="$1"
+  if [[ "${ASSUME_YES}" == "true" ]]; then
+    return 0
+  fi
+  local reply
+  if [[ -e /dev/tty ]]; then
+    read -r -p "$(echo -e "${YELLOW}?${RESET} ${prompt} [y/N] ")" reply < /dev/tty || reply=""
+  else
+    read -r -p "$(echo -e "${YELLOW}?${RESET} ${prompt} [y/N] ")" reply || reply=""
+  fi
+  [[ "${reply}" =~ ^[Yy]$ ]]
+}
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 CONTINUE_DIR="${HOME}/.continue"
-CONFIG_FILE="${CONTINUE_DIR}/config.json"
-BACKUP_FILE="${CONTINUE_DIR}/config.json.bak.$(date '+%Y%m%d_%H%M%S')"
+CONFIG_FILE="${CONTINUE_DIR}/config.yaml"
+BACKUP_FILE="${CONTINUE_DIR}/config.yaml.bak.$(date '+%Y%m%d_%H%M%S')"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ENV_FILE="${REPO_ROOT}/scripts/deploy/.env"
 
-# Optional first argument: host[:port] of the machine running vLLM.
-# Defaults to localhost:8000 for the common case of running this script
-# directly on the vLLM host.
-VLLM_HOST="${1:-localhost:8000}"
+# Resolve Host and Port
+BIND_HOST=""
+PORT=""
+
+if [[ -n "${VLLM_HOST_ARG}" ]]; then
+  if [[ "${VLLM_HOST_ARG}" == *:* ]]; then
+    BIND_HOST="${VLLM_HOST_ARG%%:*}"
+    PORT="${VLLM_HOST_ARG##*:}"
+  else
+    BIND_HOST="${VLLM_HOST_ARG}"
+    PORT="8000"
+  fi
+  info "Using vLLM server address from command line argument: ${BIND_HOST}:${PORT}"
+else
+  # Read from .env if present
+  ENV_HOST=""
+  ENV_PORT=""
+  if [[ -f "${ENV_FILE}" ]]; then
+    ENV_HOST=$(grep '^BIND_HOST=' "${ENV_FILE}" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || echo "")
+    ENV_PORT=$(grep '^PORT=' "${ENV_FILE}" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || echo "")
+  fi
+
+  # Determine BIND_HOST
+  if [[ -n "${ENV_HOST}" ]]; then
+    SUGGESTED_HOST="${ENV_HOST}"
+    if [[ "${ENV_HOST}" == "0.0.0.0" ]]; then
+      SUGGESTED_HOST="127.0.0.1"
+    fi
+    if confirm "Use vLLM host IP found in scripts/deploy/.env (${SUGGESTED_HOST})?"; then
+      BIND_HOST="${SUGGESTED_HOST}"
+    fi
+  fi
+
+  if [[ -z "${BIND_HOST}" ]]; then
+    if [[ "${ASSUME_YES}" == "true" ]]; then
+      BIND_HOST="127.0.0.1"
+    else
+      reply=""
+      if [[ -e /dev/tty ]]; then
+        read -r -p "$(echo -e "${YELLOW}?${RESET} Enter the vLLM server IP/hostname [default: 127.0.0.1]: ")" reply < /dev/tty || reply=""
+      else
+        read -r -p "$(echo -e "${YELLOW}?${RESET} Enter the vLLM server IP/hostname [default: 127.0.0.1]: ")" reply || reply=""
+      fi
+      BIND_HOST="${reply:-127.0.0.1}"
+    fi
+  fi
+
+  # Determine PORT
+  if [[ -n "${ENV_PORT}" ]]; then
+    if confirm "Use vLLM port found in scripts/deploy/.env (${ENV_PORT})?"; then
+      PORT="${ENV_PORT}"
+    fi
+  fi
+
+  if [[ -z "${PORT}" ]]; then
+    if [[ "${ASSUME_YES}" == "true" ]]; then
+      PORT="8000"
+    else
+      reply=""
+      if [[ -e /dev/tty ]]; then
+        read -r -p "$(echo -e "${YELLOW}?${RESET} Enter the vLLM server port [default: 8000]: ")" reply < /dev/tty || reply=""
+      else
+        read -r -p "$(echo -e "${YELLOW}?${RESET} Enter the vLLM server port [default: 8000]: ")" reply || reply=""
+      fi
+      PORT="${reply:-8000}"
+    fi
+  fi
+fi
+
+VLLM_HOST="${BIND_HOST}:${PORT}"
 VLLM_API_BASE="http://${VLLM_HOST}/v1"
 MODEL_TITLE="Qwen2.5-Coder-32B (vLLM @ ${VLLM_HOST})"
 
@@ -87,7 +184,7 @@ else
 fi
 
 # =============================================================================
-# STEP 1 — Verify python3 and jq
+# STEP 1 — Verify python3, PyYAML, and jq
 # =============================================================================
 step "STEP 1/4 — Dependency Check"
 
@@ -95,11 +192,15 @@ if ! command -v python3 &>/dev/null; then
   fail "python3 not found. Install it manually (e.g. apt install python3) or run scripts/prereqs/install-prereqs.sh if this is the vLLM host."
 fi
 
+if ! python3 -c "import yaml" &>/dev/null; then
+  fail "python3 PyYAML package ('yaml') not found. Install it manually (e.g. apt install python3-yaml) or run scripts/prereqs/install-prereqs.sh if this is the vLLM host."
+fi
+
 if ! command -v jq &>/dev/null; then
   fail "jq not found. Install it manually (e.g. apt install jq) or run scripts/prereqs/install-prereqs.sh if this is the vLLM host."
 fi
 
-ok "python3 and jq are available."
+ok "python3, PyYAML, and jq are available."
 
 # =============================================================================
 # STEP 2 — Ensure ~/.continue/ directory exists
@@ -110,9 +211,9 @@ mkdir -p "${CONTINUE_DIR}"
 ok "Directory ${CONTINUE_DIR} is ready."
 
 # =============================================================================
-# STEP 3 — Create or patch config.json
+# STEP 3 — Create or patch config.yaml
 # =============================================================================
-step "STEP 3/4 — Configure Continue config.json"
+step "STEP 3/4 — Configure Continue config.yaml"
 
 if [[ ! -f "${CONFIG_FILE}" ]]; then
   # -------------------------------------------------------------------------
@@ -120,72 +221,29 @@ if [[ ! -f "${CONFIG_FILE}" ]]; then
   # -------------------------------------------------------------------------
   info "${CONFIG_FILE} does not exist. Writing full default configuration..."
 
-  cat > "${CONFIG_FILE}" <<JSONEOF
-{
-  "models": [
-    {
-      "title": "${MODEL_TITLE}",
-      "provider": "openai",
-      "model": "${MODEL_ID}",
-      "apiBase": "${VLLM_API_BASE}",
-      "apiKey": "dummy",
-      "useLegacyCompletionsEndpoint": false,
-      "contextLength": 16384,
-      "completionOptions": {
-        "temperature": 0.1,
-        "topP": 0.95,
-        "maxTokens": 2048
-      }
-    }
-  ],
-  "tabAutocompleteModel": {
-    "title": "${MODEL_TITLE} (Autocomplete)",
-    "provider": "openai",
-    "model": "${MODEL_ID}",
-    "apiBase": "${VLLM_API_BASE}",
-    "apiKey": "dummy",
-    "useLegacyCompletionsEndpoint": false,
-    "contextLength": 4096,
-    "completionOptions": {
-      "temperature": 0.05,
-      "maxTokens": 512,
-      "stop": ["\n\n", "\`\`\`"]
-    }
-  },
-  "tabAutocompleteOptions": {
-    "disable": false,
-    "useCopyBuffer": false,
-    "maxPromptTokens": 1024,
-    "prefixPercentage": 0.85
-  },
-  "embeddingsProvider": {
-    "provider": "transformers.js"
-  },
-  "contextProviders": [
-    { "name": "code",       "params": {} },
-    { "name": "docs",       "params": {} },
-    { "name": "diff",       "params": {} },
-    { "name": "terminal",   "params": {} },
-    { "name": "problems",   "params": {} },
-    { "name": "folder",     "params": {} },
-    { "name": "codebase",   "params": {} }
-  ],
-  "slashCommands": [
-    { "name": "edit",     "description": "Edit selected code" },
-    { "name": "comment",  "description": "Write comments for selected code" },
-    { "name": "share",    "description": "Export conversation" },
-    { "name": "cmd",      "description": "Generate shell command" },
-    { "name": "commit",   "description": "Generate a git commit message" }
-  ],
-  "allowAnonymousTelemetry": false
-}
-JSONEOF
+  cat > "${CONFIG_FILE}" <<YAMLEOF
+name: Local Config
+version: 1.0.0
+schema: v1
 
-  ok "Default config.json written to ${CONFIG_FILE}."
+models:
+  - name: ${MODEL_TITLE}
+    provider: openai
+    model: ${MODEL_ID}
+    apiBase: ${VLLM_API_BASE}
+    apiKey: dummy
+    roles:
+      - chat
+      - edit
+      - apply
+      - autocomplete
+YAMLEOF
+
+  ok "Default config.yaml written to ${CONFIG_FILE}."
 
 else
   # -------------------------------------------------------------------------
-  # Config already exists — safely inject our endpoint using Python+json
+  # Config already exists — safely inject our endpoint using Python+PyYAML
   # -------------------------------------------------------------------------
   info "${CONFIG_FILE} already exists. Backing up to ${BACKUP_FILE}..."
   cp "${CONFIG_FILE}" "${BACKUP_FILE}"
@@ -195,8 +253,8 @@ else
 
   set +e
   python3 - <<PYEOF
-import json
 import sys
+import yaml
 
 config_path  = "${CONFIG_FILE}"
 model_id     = "${MODEL_ID}"
@@ -205,71 +263,79 @@ model_title  = "${MODEL_TITLE}"
 
 # Load existing config
 try:
-    with open(config_path, "r") as f:
-        config = json.load(f)
-except json.JSONDecodeError as e:
-    print(f"  [ERROR] {config_path} is not valid JSON: {e}", file=sys.stderr)
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+except Exception as e:
+    print(f"  [ERROR] {config_path} is not valid YAML: {e}", file=sys.stderr)
     sys.exit(1)
 
-# Build new chat model entry
-new_chat_model = {
-    "title": model_title,
-    "provider": "openai",
-    "model": model_id,
-    "apiBase": api_base,
-    "apiKey": "dummy",
-    "useLegacyCompletionsEndpoint": False,
-    "contextLength": 16384,
-    "completionOptions": {
-        "temperature": 0.1,
-        "topP": 0.95,
-        "maxTokens": 2048
-    }
-}
-
-# Build autocomplete model entry
-new_autocomplete_model = {
-    "title": f"{model_title} (Autocomplete)",
-    "provider": "openai",
-    "model": model_id,
-    "apiBase": api_base,
-    "apiKey": "dummy",
-    "useLegacyCompletionsEndpoint": False,
-    "contextLength": 4096,
-    "completionOptions": {
-        "temperature": 0.05,
-        "maxTokens": 512,
-        "stop": ["\n\n", "\`\`\`"]
-    }
-}
+if not config:
+    config = {}
 
 # Ensure models array exists
 if "models" not in config or not isinstance(config["models"], list):
     config["models"] = []
 
-# Check if our model entry already exists (by apiBase + model ID)
-existing_titles = {m.get("title") for m in config["models"]}
-if model_title in existing_titles:
-    print(f"  [INFO] Model '{model_title}' already present in models array — updating in place.")
-    config["models"] = [
-        new_chat_model if m.get("title") == model_title else m
-        for m in config["models"]
-    ]
-else:
-    # Prepend so our local model is the default selected one
-    config["models"].insert(0, new_chat_model)
-    print(f"  [INFO] Inserted '{model_title}' at position 0 of models array.")
+# Build new model entry
+new_model = {
+    "name": model_title,
+    "provider": "openai",
+    "model": model_id,
+    "apiBase": api_base,
+    "apiKey": "dummy",
+    "roles": ["chat", "edit", "apply", "autocomplete"]
+}
 
-# Always update tabAutocompleteModel to point to local endpoint
-config["tabAutocompleteModel"] = new_autocomplete_model
-print(f"  [INFO] tabAutocompleteModel set to: {model_title}")
+# Filter out old local vLLM entries to avoid duplicates
+cleaned_models = []
+already_configured = False
+
+for m in config["models"]:
+    if not isinstance(m, dict):
+        cleaned_models.append(m)
+        continue
+
+    # Identify local vLLM models
+    is_vllm = False
+    if m.get("provider") == "openai":
+        api_base_str = m.get("apiBase", "")
+        if any(ip_prefix in api_base_str for ip_prefix in ["localhost", "127.0.0.1", "10.", "192.168.", "172."]):
+            is_vllm = True
+        elif "vLLM" in m.get("name", ""):
+            is_vllm = True
+
+    if is_vllm:
+        if m.get("apiBase") == api_base and m.get("model") == model_id:
+            already_configured = True
+    else:
+        # Keep non-vLLM models (e.g. Claude)
+        cleaned_models.append(m)
+
+# If the exact model is already the first model, we can exit early
+if already_configured and len(config["models"]) > 0 and config["models"][0].get("apiBase") == api_base:
+    print("  [INFO] The exact local vLLM model is already configured. Exiting.")
+    sys.exit(0)
+
+# Prepend the new model entry
+cleaned_models.insert(0, new_model)
+config["models"] = cleaned_models
+
+# Ensure name, version, and schema are set in root if not present
+if "name" not in config:
+    config["name"] = "Local Config"
+if "version" not in config:
+    config["version"] = "1.0.0"
+if "schema" not in config:
+    config["schema"] = "v1"
 
 # Write back with clean formatting
-with open(config_path, "w") as f:
-    json.dump(config, f, indent=2)
-    f.write("\n")
-
-print(f"  [OK]  {config_path} updated successfully.")
+try:
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
+    print(f"  [OK]  {config_path} updated successfully.")
+except Exception as e:
+    print(f"  [ERROR] Failed to write {config_path}: {e}", file=sys.stderr)
+    sys.exit(1)
 PYEOF
   PYTHON_STATUS=$?
   set -e
@@ -277,26 +343,26 @@ PYEOF
   if [[ "${PYTHON_STATUS}" -ne 0 ]]; then
     warn "Failed to update ${CONFIG_FILE}. Restoring backup from ${BACKUP_FILE}..."
     cp "${BACKUP_FILE}" "${CONFIG_FILE}"
-    fail "config.json update failed and was rolled back. Fix the JSON syntax error above and re-run."
+    fail "config.yaml update failed and was rolled back. Fix the YAML syntax error above and re-run."
   fi
 fi
 
 # =============================================================================
-# STEP 4 — Validate the final JSON
+# STEP 4 — Validate the final YAML
 # =============================================================================
-step "STEP 4/4 — Validate Config JSON Syntax"
+step "STEP 4/4 — Validate Config YAML Syntax"
 
-if jq empty "${CONFIG_FILE}" 2>/dev/null; then
-  ok "JSON validation passed — config.json is well-formed."
+if python3 -c "import yaml; yaml.safe_load(open('${CONFIG_FILE}'))" &>/dev/null; then
+  ok "YAML validation passed — config.yaml is well-formed."
 else
   if [[ -f "${BACKUP_FILE}" ]]; then
-    warn "JSON validation FAILED. Restoring backup from ${BACKUP_FILE}..."
+    warn "YAML validation FAILED. Restoring backup from ${BACKUP_FILE}..."
     cp "${BACKUP_FILE}" "${CONFIG_FILE}"
-    warn "Restored backup. Inspect config.json and re-run the script."
+    warn "Restored backup. Inspect config.yaml and re-run the script."
   else
-    warn "JSON validation FAILED. No backup file found to restore."
+    warn "YAML validation FAILED. No backup file found to restore."
   fi
-  fail "JSON validation FAILED. config.json is not well-formed."
+  fail "YAML validation FAILED. config.yaml is not well-formed."
 fi
 
 # Show summary of configured endpoints
@@ -305,7 +371,7 @@ echo -e "${BOLD}  Continue Extension Configuration Summary:${RESET}"
 echo -e "  Config file   : ${CONFIG_FILE}"
 echo -e "  Model ID      : ${MODEL_ID}  (resolved from live server or .env)"
 echo -e "  API Base      : ${VLLM_API_BASE}"
-echo -e "  Autocomplete  : enabled (same model, limited context)"
+echo -e "  Roles         : chat, edit, apply, autocomplete"
 echo ""
 
 echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════════════╗${RESET}"

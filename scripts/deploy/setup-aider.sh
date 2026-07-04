@@ -6,7 +6,7 @@
 # Supports updating existing files or creating new ones.
 #
 # Usage:
-#   bash scripts/deploy/setup-aider.sh [-y|--yes]
+#   bash scripts/deploy/setup-aider.sh [vllm-host] [-y|--yes]
 # =============================================================================
 set -euo pipefail
 
@@ -21,14 +21,18 @@ step()  { echo -e "\n${BOLD}─────────────────�
 
 # --- Options -------------------------------------------------------------
 ASSUME_YES=false
+VLLM_HOST_ARG=""
 for arg in "$@"; do
   case "${arg}" in
     -y|--yes) ASSUME_YES=true ;;
     -h|--help)
-      echo "Usage: bash scripts/deploy/setup-aider.sh [-y|--yes]"
-      echo "  -y, --yes   Auto-confirm install and configuration prompts."
+      echo "Usage: bash scripts/deploy/setup-aider.sh [vllm-host] [-y|--yes]"
+      echo "  vllm-host   Optional host[:port] of the vLLM server."
+      echo "  -y, --yes   Auto-confirm prompts."
       exit 0
       ;;
+    -*) ;;
+    *) VLLM_HOST_ARG="${arg}" ;;
   esac
 done
 
@@ -102,30 +106,87 @@ fi
 # =============================================================================
 step "STEP 2/3 — Resolve vLLM Configuration"
 
-# Load values from .env
-BIND_HOST="127.0.0.1"
-PORT="8000"
+# Resolve Host, Port, and Model
+BIND_HOST=""
+PORT=""
 MODEL_ID=""
+MAX_MODEL_LEN="6144"
 
+if [[ -n "${VLLM_HOST_ARG}" ]]; then
+  if [[ "${VLLM_HOST_ARG}" == *:* ]]; then
+    BIND_HOST="${VLLM_HOST_ARG%%:*}"
+    PORT="${VLLM_HOST_ARG##*:}"
+  else
+    BIND_HOST="${VLLM_HOST_ARG}"
+    PORT="8000"
+  fi
+  info "Using vLLM server address from command line argument: ${BIND_HOST}:${PORT}"
+else
+  # Read from .env if present
+  ENV_HOST=""
+  ENV_PORT=""
+  if [[ -f "${ENV_FILE}" ]]; then
+    ENV_HOST=$(grep '^BIND_HOST=' "${ENV_FILE}" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || echo "")
+    ENV_PORT=$(grep '^PORT=' "${ENV_FILE}" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || echo "")
+  fi
+
+  # Determine BIND_HOST
+  if [[ -n "${ENV_HOST}" ]]; then
+    SUGGESTED_HOST="${ENV_HOST}"
+    if [[ "${ENV_HOST}" == "0.0.0.0" ]]; then
+      SUGGESTED_HOST="127.0.0.1"
+    fi
+    if confirm "Use vLLM host IP found in scripts/deploy/.env (${SUGGESTED_HOST})?"; then
+      BIND_HOST="${SUGGESTED_HOST}"
+    fi
+  fi
+
+  if [[ -z "${BIND_HOST}" ]]; then
+    if [[ "${ASSUME_YES}" == "true" ]]; then
+      BIND_HOST="127.0.0.1"
+    else
+      reply=""
+      if [[ -e /dev/tty ]]; then
+        read -r -p "$(echo -e "${YELLOW}?${RESET} Enter the vLLM server IP/hostname [default: 127.0.0.1]: ")" reply < /dev/tty || reply=""
+      else
+        read -r -p "$(echo -e "${YELLOW}?${RESET} Enter the vLLM server IP/hostname [default: 127.0.0.1]: ")" reply || reply=""
+      fi
+      BIND_HOST="${reply:-127.0.0.1}"
+    fi
+  fi
+
+  # Determine PORT
+  if [[ -n "${ENV_PORT}" ]]; then
+    if confirm "Use vLLM port found in scripts/deploy/.env (${ENV_PORT})?"; then
+      PORT="${ENV_PORT}"
+    fi
+  fi
+
+  if [[ -z "${PORT}" ]]; then
+    if [[ "${ASSUME_YES}" == "true" ]]; then
+      PORT="8000"
+    else
+      reply=""
+      if [[ -e /dev/tty ]]; then
+        read -r -p "$(echo -e "${YELLOW}?${RESET} Enter the vLLM server port [default: 8000]: ")" reply < /dev/tty || reply=""
+      else
+        read -r -p "$(echo -e "${YELLOW}?${RESET} Enter the vLLM server port [default: 8000]: ")" reply || reply=""
+      fi
+      PORT="${reply:-8000}"
+    fi
+  fi
+fi
+
+# Load other defaults/configs from .env if it exists
 if [[ -f "${ENV_FILE}" ]]; then
-  info "Reading vLLM config from ${ENV_FILE}..."
-  BIND_HOST=$(grep '^BIND_HOST=' "${ENV_FILE}" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || echo "0.0.0.0")
-  PORT=$(grep '^PORT=' "${ENV_FILE}" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || echo "8000")
+  MAX_MODEL_LEN=$(grep '^MAX_MODEL_LEN=' "${ENV_FILE}" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || echo "6144")
   MODEL_ID=$(grep '^SERVED_MODEL_NAME=' "${ENV_FILE}" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || echo "")
   if [[ -z "${MODEL_ID}" ]]; then
     MODEL_ID=$(grep '^MODEL=' "${ENV_FILE}" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || echo "")
   fi
-else
-  warn "No .env file found at ${ENV_FILE}. Using default localhost connection details."
 fi
 
-# Adjust BIND_HOST 0.0.0.0 for client-side API base URL
-CLIENT_HOST="${BIND_HOST}"
-if [[ "${BIND_HOST}" == "0.0.0.0" ]]; then
-  CLIENT_HOST="127.0.0.1"
-fi
-
-VLLM_HOST="${CLIENT_HOST}:${PORT}"
+VLLM_HOST="${BIND_HOST}:${PORT}"
 VLLM_API_BASE="http://${VLLM_HOST}/v1"
 
 # Try to query the live server for the actual served model ID
@@ -152,7 +213,7 @@ fi
 AIDER_MODEL="openai/${MODEL_ID}"
 
 # =============================================================================
-# STEP 3 — Configure Aider (.aider.conf.yml)
+# STEP 3 — Configure Aider (.aider.conf.yml and model metadata)
 # =============================================================================
 step "STEP 3/3 — Configure Aider"
 
@@ -250,6 +311,49 @@ try:
     print(f"  [OK] Successfully updated {config_path}")
 except Exception as e:
     print(f"  [ERROR] Failed to write {config_path}: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+
+  # Write/Update model metadata json to suppress unknown model warning
+  metadata_path="$(dirname "${config_path}")/.aider.model.metadata.json"
+  info "Configuring Aider model metadata in ${metadata_path}..."
+
+  python3 - <<PYEOF
+import os, json, sys
+
+metadata_path = "${metadata_path}"
+model_key = "${AIDER_MODEL}"
+try:
+    max_len = int("${MAX_MODEL_LEN}")
+except ValueError:
+    max_len = 6144
+
+data = {}
+if os.path.exists(metadata_path):
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        # Start fresh if parsing fails
+        data = {}
+
+data[model_key] = {
+    "max_tokens": max_len,
+    "max_input_tokens": max_len,
+    "max_output_tokens": min(max_len, 4096),
+    "input_cost_per_token": 0.0,
+    "output_cost_per_token": 0.0,
+    "litellm_provider": "openai",
+    "mode": "chat"
+}
+
+try:
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    print(f"  [OK] Successfully updated {metadata_path}")
+except Exception as e:
+    print(f"  [ERROR] Failed to write {metadata_path}: {e}", file=sys.stderr)
     sys.exit(1)
 PYEOF
 
