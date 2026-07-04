@@ -194,7 +194,7 @@ if [[ "${TOTAL_VRAM_MiB}" -le 24576 ]]; then
   # If we have 12 GiB cards running a 32B model, we must drop context to 8192
   # to allow enough memory for the KV cache blocks.
   if [[ "${PRIMARY_VRAM_MiB}" -le 13312 ]] && [[ "${MODEL}" =~ 32[bB] ]]; then
-    MAX_MODEL_LEN=4096
+    MAX_MODEL_LEN=6144
     info "12 GiB cards running 32B model. Capping MAX_MODEL_LEN=${MAX_MODEL_LEN} to avoid KV Cache memory allocation failure."
   else
     MAX_MODEL_LEN=16384
