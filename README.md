@@ -1,4 +1,4 @@
-# vllm-containerized-deploy
+# vllm-local-developer-stack
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit)](https://github.com/pre-commit/pre-commit)
@@ -8,7 +8,7 @@
 [![NVIDIA CUDA](https://img.shields.io/badge/CUDA-12.x-green?logo=nvidia)](https://developer.nvidia.com/cuda-zone)
 [![vLLM](https://img.shields.io/badge/vLLM-Supported-orange)](https://github.com/vllm-project/vllm)
 
-> Production-grade automation for self-hosting **Qwen2.5-Coder-32B-Instruct-AWQ** on a dual-GPU RTX 3060 setup using vLLM with Tensor Parallelism.
+> Production-grade automation for self-hosting **Qwen2.5-Coder-14B-Instruct-AWQ** on a dual-GPU RTX 3060 setup using vLLM with Tensor Parallelism.
 
 | Component | Specification |
 |-----------|--------------|
@@ -16,9 +16,9 @@
 | Total VRAM | 24 GB |
 | Parallelism | Tensor Parallel (size=2) |
 | Host OS | Ubuntu 22.04 LTS |
-| Model | `Qwen/Qwen2.5-Coder-32B-Instruct-AWQ` |
+| Model | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` |
 | Quantization | AWQ (4-bit activation-aware) |
-| Context | 16,384 tokens (capped for KV cache budget) |
+| Context | 16,384 tokens (can be raised to 32,768 on a headless GPU 0 — see [Display Server Impact](#display-server-impact)) |
 
 ## Deployment Scope
 
@@ -28,7 +28,7 @@ The intended use case is:
 
 - Run vLLM on one GPU-equipped Ubuntu host
 - Expose the vLLM API on the private LAN
-- Connect coding tools such as Continue in VS Code
+- Connect editor/CLI tools such as Zed, Continue (VS Code/JetBrains), or Aider
 - Optionally connect a local web UI for direct chat interaction
 
 This repo does not currently target:
@@ -44,23 +44,26 @@ This repo does not currently target:
 - [Deployment Scope](#deployment-scope)
 - [Repository Structure](#repository-structure)
 - [Deploying](#deploying)
-  - [1. Configure `scripts/deploy/.env`](#1-configure-deployenv)
+  - [1. Configure `scripts/deploy/.env`](#1-configure-scriptsdeployenv)
   - [2. Run the deploy script](#2-run-the-deploy-script)
   - [3. Verify performance](#3-verify-performance)
 - [Manual Step-by-Step Setup (Advanced)](#manual-step-by-step-setup-advanced)
 - [API Usage](#api-usage)
+- [Client & Editor Integrations](#client--editor-integrations)
+  - [Zed](#zed)
+  - [Continue (VS Code & JetBrains)](#continue-vs-code--jetbrains)
+  - [Aider](#aider)
 - [Tuning Reference](#tuning-reference)
 - [Server Management](#server-management)
 - [Open WebUI Support (Optional)](#open-webui-support-optional)
 - [Security Notes](#security-notes)
 - [Development & Code Quality](#development--code-quality)
-- [Editor Integration: VS Code Continue Extension](#editor-integration-vs-code-continue-extension)
 - [License](#license)
 
 ## Repository Structure
 
 ```
-vllm-containerized-deploy/
+vllm-local-developer-stack/
 ├── .gitignore                          # Ignores WORKLOG.md, scripts/deploy/.env, generated override files, benchmark results
 ├── .pre-commit-config.yaml             # Pre-commit framework configuration
 ├── .secrets.baseline                   # detect-secrets baseline — known false positives
@@ -79,7 +82,9 @@ vllm-containerized-deploy/
     │   ├── .env.example                # Annotated parameter reference — copy to .env
     │   ├── validate-system.sh          # Pre-flight hardware validation
     │   ├── validate-vram.sh            # Live startup telemetry monitor
-    │   ├── setup-continue.sh           # VS Code Continue extension hook
+    │   ├── setup-zed.sh                # Zed IDE integration hook (primary supported IDE)
+    │   ├── setup-continue.sh           # Continue extension hook (VS Code & JetBrains)
+    │   ├── setup-aider.sh              # Aider CLI integration hook
     │   ├── smoke-test.sh               # Smoke test verification for endpoints
     │   └── teardown.sh                 # Graceful server teardown wrapper (stops and deletes containers)
     └── tuning/
@@ -273,7 +278,7 @@ bash scripts/tuning/tune-inference.sh
 
 Queries your GPU topology dynamically and writes a hardware-appropriate
 `scripts/deploy/.env`. If `scripts/deploy/.env` doesn't exist yet, it's created from
-scratch. If it already exists, only the five hardware-tuned keys below are
+scratch. If it already exists, only the hardware-tuned keys below are
 updated in place — any change is printed as an `old -> new` diff before
 being applied. Everything else in the file (`MODEL`, `BIND_HOST`, `PORT`,
 `HF_CACHE_DIR`, `HF_TOKEN`, optional feature flags, comments) is left
@@ -282,8 +287,8 @@ exactly as it is on disk.
 | Parameter | Value (24 GiB setup) | Rationale |
 |-----------|---------------------|-----------|
 | `TENSOR_PARALLEL_SIZE` | 2 | One shard per GPU |
-| `GPU_MEMORY_UTILIZATION` | 0.90 | ~1.2 GiB headroom per card |
-| `MAX_MODEL_LEN` | 16384 | KV cache stays within VRAM budget |
+| `GPU_MEMORY_UTILIZATION` | 0.85 | Headroom for CUDA overhead + a display server on GPU 0 |
+| `MAX_MODEL_LEN` | 16384 | KV cache stays within VRAM budget (14B model; see [Display Server Impact](#display-server-impact) for pushing this to 32768) |
 | `SWAP_SPACE` | 4 GiB | CPU offload buffer for burst traffic |
 
 Review `scripts/deploy/.env` before continuing — you may manually adjust any
@@ -312,7 +317,7 @@ docker compose -f deploy-artifacts/docker-compose.yml up -d
 docker logs vllm-coder-server --follow
 ```
 
-From here, continue with [Verify performance](#3-verify-performance) above, or [Editor Integration: VS Code Continue Extension](#editor-integration-vs-code-continue-extension) at the end of this document.
+From here, continue with [Verify performance](#3-verify-performance) above, or [Client & Editor Integrations](#client--editor-integrations) below.
 
 > ⚠ Going this manual route skips the boot-persistence check `deploy.sh`
 > does automatically. `docker-compose.yml` sets `restart: unless-stopped`,
@@ -333,7 +338,7 @@ Once the server is running, it exposes a fully OpenAI-compatible API:
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen2.5-coder-32b-awq",
+    "model": "qwen2.5-coder-14b-awq",
     "messages": [{"role": "user", "content": "Write a Python async HTTP client"}],
     "max_tokens": 512,
     "temperature": 0.1
@@ -357,12 +362,105 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="qwen2.5-coder-32b-awq",
+    model="qwen2.5-coder-14b-awq",
     messages=[{"role": "user", "content": "Implement a binary search tree in Go"}],
     max_tokens=1024,
     temperature=0.1,
 )
 print(response.choices[0].message.content)
+```
+
+## Client & Editor Integrations
+
+These are client-side setup steps, separate from deploying, tuning, or
+benchmarking the server. Each script below configures one editor/tool to
+point at your running vLLM endpoint — run interactively (it prompts, or
+reads `BIND_HOST:PORT` from `.env` if present) or with the host passed
+directly as an argument. Run a given script on **whichever workstation has
+that tool installed** — it does not need to be the machine hosting vLLM.
+
+### Zed
+
+Zed is the primary supported editor for this stack's AI assistant integration.
+
+**Step 1 — Run the configuration script**:
+
+```bash
+bash scripts/deploy/setup-zed.sh                    # reads host/port from .env or prompts
+bash scripts/deploy/setup-zed.sh 192.168.1.50:8000  # or pass the host directly
+```
+
+This configures `~/.config/zed/settings.json`, injecting the vLLM endpoint
+as a custom OpenAI-compatible provider. It resolves the live model ID and
+context window from `GET /v1/models` if the server is reachable, falling
+back to `scripts/deploy/.env`'s `SERVED_MODEL_NAME`/`MAX_MODEL_LEN`
+otherwise. Any existing `settings.json` is backed up first
+(`settings.json.bak.<timestamp>`), so it's safe to re-run whenever the
+server's model or context length changes.
+
+**Step 2 — Set the API key placeholder**:
+
+vLLM doesn't enforce an API key, but Zed's OpenAI provider requires one to
+be present:
+
+1. In Zed, open the Agent panel and click the model selector in the
+   bottom-right corner → **Configure...** (or run the `agent: settings`
+   command via `Ctrl+Shift+A`).
+2. Under the **OpenAI** provider section, enter `dummy` as the API key.
+
+| Setting | Value |
+|---------|-------|
+| Provider | `openai` (custom endpoint via `api_url`) |
+| API Base | `http://<host>:<port>/v1` |
+| Model | Resolved live from `GET /v1/models` if reachable (typically `qwen2.5-coder-14b-awq`) — falls back to `.env`'s `SERVED_MODEL_NAME` |
+| API Key | Not enforced by vLLM — use `dummy` in Zed's provider settings |
+
+### Continue (VS Code & JetBrains)
+
+Install the **Continue** extension/plugin ([VS Code Marketplace](https://marketplace.visualstudio.com/) or [JetBrains Marketplace](https://plugins.jetbrains.com/), for IDEs like PyCharm/IntelliJ/WebStorm/CLion), then run:
+
+```bash
+bash scripts/deploy/setup-continue.sh
+# or: bash scripts/deploy/setup-continue.sh 192.168.1.50:8000
+```
+
+#### Supported IDEs
+
+* **VS Code** — run the script, then reload the window (`Ctrl+Shift+P` → **Developer: Reload Window**).
+* **JetBrains IDEs** (PyCharm, IntelliJ IDEA, WebStorm, CLion, etc.) — run the script (Continue in JetBrains shares the same `~/.continue/config.json` global path on Linux/macOS), then restart the IDE or click the gear icon in the Continue sidebar to refresh.
+
+#### How it Works / Custom Configurations
+The setup script injects the vLLM endpoint into `~/.continue/config.yaml` on the machine you run it on, setting it as both the **chat model** and the **tab-autocomplete model**. It will create the file with full defaults if it doesn't exist, or patch it safely (with a backup) if it does.
+
+| Setting | Value |
+|---------|-------|
+| Provider | `openai` (OpenAI-compatible) |
+| API Base | `http://<host>:<port>/v1` |
+| Model | Resolved live from `GET /v1/models` if the server is reachable (typically `qwen2.5-coder-14b-awq`, matching `--served-model-name`) — falls back to `MODEL=` from `scripts/deploy/.env` with a warning if it isn't (only relevant when run on the vLLM host itself, since that's the only place `scripts/deploy/.env` exists) |
+| Autocomplete | Same resolved model, `max_tokens=512`, `temperature=0.05` |
+
+If the server isn't reachable yet when you run this from a remote
+workstation, it falls back to the default HuggingFace model ID — re-run it
+once the server is up for an accurate config.
+
+### Aider
+
+You can also use [Aider](https://aider.chat) as a command-line coding assistant powered by the vLLM instance. A setup script is provided to automate Aider installation and configuration.
+
+```bash
+bash scripts/deploy/setup-aider.sh
+# or: bash scripts/deploy/setup-aider.sh 192.168.1.50:8000
+```
+
+This script:
+1. Detects if Aider is installed. If it is not, it stops to confirm if you want to install it (supporting installation via `pipx` or `pip`).
+2. Resolves the vLLM server address (interactively prompting for IP and port, reading from `scripts/deploy/.env`, or using the command-line argument).
+3. Safely updates or creates Aider configuration files (`.aider.conf.yml` at the project root or `~/.aider.conf.yml` in your home directory) to use the local vLLM endpoint, specifically patching only the OpenAI-compatible API base URL, API key, and model parameters.
+4. Generates or updates `.aider.model.metadata.json` alongside your Aider config to register the correct context window size (based on the server's `MAX_MODEL_LEN`) and token cost structures, suppressing any "Unknown context window size and costs" warnings.
+
+Once configured, simply run:
+```bash
+aider
 ```
 
 ## Tuning Reference
@@ -398,9 +496,11 @@ needs, which a card can fail even while running at its own full rated spec
 
 ### Display Server Impact
 
-Running a desktop environment while serving a 32B model is a tight fit on
-24 GiB. If GPU 0 shows >800 MiB idle usage, the display server is
-competing with the KV cache:
+Even with the smaller 14B model, a desktop environment competing for GPU
+0's VRAM can push KV cache allocation into an OOM at boot — this is why the
+shipped defaults use `GPU_MEMORY_UTILIZATION=0.85` and `MAX_MODEL_LEN=16384`
+rather than the more aggressive `0.90`/`32768` the hardware can otherwise
+support. If GPU 0 shows >800 MiB idle usage, free it before deploying:
 
 ```bash
 # Free GPU 0 before deployment (non-destructive, re-enable with graphical.target)
@@ -409,6 +509,10 @@ sudo systemctl isolate multi-user.target
 # Re-enable desktop when done
 sudo systemctl isolate graphical.target
 ```
+
+If GPU 0 is already headless (no idle usage), you can raise
+`GPU_MEMORY_UTILIZATION` back to `0.90` and `MAX_MODEL_LEN` to `32768` in
+`scripts/deploy/.env` for the full context window.
 
 ## Server Management
 
@@ -564,68 +668,6 @@ Run every pre-commit check against all files at any time:
 
 ```bash
 pre-commit run --all-files
-```
-
-## IDE Integration: Continue Extension (VS Code & JetBrains)
-
-This is a client-side setup step, separate from deploying, tuning, or
-benchmarking the server. Run it on **whichever workstation has your IDE and
-the [Continue](https://continue.dev) extension installed** (e.g., VS Code or JetBrains IDEs like PyCharm/IntelliJ). That machine does not need to be the one hosting vLLM.
-
-```bash
-# Run interactively (will prompt to use IP/port from .env if present, or let you enter one manually):
-bash scripts/deploy/setup-continue.sh
-
-# Or pass the host's BIND_HOST:PORT directly as an argument:
-bash scripts/deploy/setup-continue.sh 192.168.1.50:8000
-```
-
-### Supported IDEs
-
-#### 1. VS Code
-* Install the **Continue** extension from the VS Code Marketplace.
-* Run the `setup-continue.sh` script above to configure the endpoint.
-* Once the script finishes, reload the VS Code window (`Ctrl+Shift+P` → **Developer: Reload Window**).
-
-#### 2. JetBrains IDEs (PyCharm, IntelliJ IDEA, WebStorm, CLion, etc.)
-* Install the **Continue** plugin from the JetBrains Marketplace.
-* Run the `setup-continue.sh` script above. (Continue in JetBrains shares the same `~/.continue/config.json` global configuration path on Linux/macOS).
-* Restart your JetBrains IDE or click the gear icon in the Continue sidebar to refresh the configuration.
-
-### How it Works / Custom Configurations
-The setup script injects the vLLM endpoint into `~/.continue/config.yaml` on the machine you run it on, setting it as both the **chat model** and the **tab-autocomplete model**. It will create the file with full defaults if it doesn't exist, or patch it safely (with a backup) if it does.
-
-| Setting | Value |
-|---------|-------|
-| Provider | `openai` (OpenAI-compatible) |
-| API Base | `http://<host>:<port>/v1` |
-| Model | Resolved live from `GET /v1/models` if the server is reachable (typically `qwen2.5-coder-32b-awq`, matching `--served-model-name`) — falls back to `MODEL=` from `scripts/deploy/.env` with a warning if it isn't (only relevant when run on the vLLM host itself, since that's the only place `scripts/deploy/.env` exists) |
-| Autocomplete | Same resolved model, `max_tokens=512`, `temperature=0.05` |
-
-If the server isn't reachable yet when you run this from a remote
-workstation, it falls back to the default HuggingFace model ID — re-run it
-once the server is up for an accurate config.
-## Client Integration: Aider
-
-You can also use [Aider](https://aider.chat) as a command-line coding assistant powered by the vLLM instance. A setup script is provided to automate Aider installation and configuration.
-
-```bash
-# Run interactively (will prompt to use IP/port from .env if present, or let you enter one manually):
-bash scripts/deploy/setup-aider.sh
-
-# Or pass the host's BIND_HOST:PORT directly as an argument:
-bash scripts/deploy/setup-aider.sh 192.168.1.50:8000
-```
-
-This script:
-1. Detects if Aider is installed. If it is not, it stops to confirm if you want to install it (supporting installation via `pipx` or `pip`).
-2. Resolves the vLLM server address (interactively prompting for IP and port, reading from `scripts/deploy/.env`, or using the command-line argument).
-3. Safely updates or creates Aider configuration files (`.aider.conf.yml` at the project root or `~/.aider.conf.yml` in your home directory) to use the local vLLM endpoint, specifically patching only the OpenAI-compatible API base URL, API key, and model parameters.
-4. Generates or updates `.aider.model.metadata.json` alongside your Aider config to register the correct context window size (based on the server's `MAX_MODEL_LEN`) and token cost structures, suppressing any "Unknown context window size and costs" warnings.
-
-Once configured, simply run:
-```bash
-aider
 ```
 
 ## License
