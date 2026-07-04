@@ -257,7 +257,7 @@ new_vendor = {
             "id": model_id,
             "name": model_name,
             "url": api_url,
-            "toolCalling": False,
+            "toolCalling": True,
             "vision": False,
             "maxInputTokens": max_tokens
         }
@@ -275,7 +275,7 @@ for entry in config:
 
     if entry.get("name") == "Local vLLM Server" or entry.get("vendor") == "customendpoint":
         models = entry.get("models", [])
-        if len(models) > 0 and models[0].get("url") == api_url and models[0].get("id") == model_id and models[0].get("maxInputTokens") == max_tokens and models[0].get("toolCalling") == False:
+        if len(models) > 0 and models[0].get("url") == api_url and models[0].get("id") == model_id and models[0].get("maxInputTokens") == max_tokens and models[0].get("toolCalling") == True:
             already_configured = True
             cleaned_config.append(entry)
     else:
